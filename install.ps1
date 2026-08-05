@@ -3,7 +3,7 @@
 #  Установщик для Windows (Linux/macOS — см. install.sh)
 #
 #  Запуск (PowerShell, от имени обычного пользователя):
-#    curl.exe -L https://raw.githubusercontent.com/DarkPushkin/cableguard/main/install.ps1 -o install.ps1
+#    curl.exe -L https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install.ps1 -o install.ps1
 #    powershell -ExecutionPolicy Bypass -File install.ps1
 # ═══════════════════════════════════════════════════════════════════════════
 $ErrorActionPreference = "Stop"

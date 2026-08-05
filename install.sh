@@ -7,9 +7,9 @@
 #    git clone → venv → зависимости → yolo веса → конфиг → тест
 #
 #  Запуск:
-#    curl -sSL https://raw.githubusercontent.com/DarkPushkin/cableguard/main/install.sh | bash
+#    curl -sSL https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install.sh | bash
 #    или
-#    git clone https://github.com/DarkPushkin/cableguard.git && cd cableguard && bash install.sh
+#    git clone https://github.com/PerfectFriend/AISuperGuard.git && cd cableguard && bash install.sh
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 

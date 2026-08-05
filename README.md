@@ -68,13 +68,13 @@ ES · EN · RU
 
 **Windows (PowerShell):**
 ```powershell
-curl.exe -L https://raw.githubusercontent.com/PerfectFriend/cableguard/main/install.ps1 -o install.ps1
+curl.exe -L https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install.ps1 -o install.ps1
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
 **Linux/macOS:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/PerfectFriend/cableguard/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install.sh | bash
 ```
 
 Después:
