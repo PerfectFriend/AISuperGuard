@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Конфиг с секретами (шаблон — config.example.yaml)
+config.yaml
+
+# Данные
+alerts/
+logs/
+*.log
+*.jsonl
+
+# Веса (скачиваются установщиком)
+*.pt
+
+# Временное
+*.tmp
