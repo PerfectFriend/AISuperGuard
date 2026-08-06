@@ -12,6 +12,8 @@ import requests
 import cv2
 import numpy as np
 import tinytuya
+from typing import Optional
+from actuators import TuyaActuator
 from ultralytics import YOLO
 
 # ---------------- config ----------------
@@ -40,6 +42,37 @@ if not PLUG_KEY:
     raise SystemExit("SG_PLUG_KEY not set in sguard.env")
 
 CAM_URL = env.get("SG_CAM_URL", "https://atcs.banjarkota.go.id:5443/LiveApp/streams/Ptzparungsari.m3u8")
+
+# ---------------- cameras: multi-camera support (8 cameras) ----------------
+# Additional cameras can be configured via sguard.env:
+# SG_CAM_1=url1
+# SG_CAM_2=url2
+# etc.
+# Or add them here directly (replace with real URLs when available):
+CAMERA_URLS = {
+    "main": CAM_URL,
+    "cam_2": "",  # Banjar PTZ
+    "cam_3": "",  # London Traffic
+    "cam_4": "",  # NYC Traffic
+    "cam_5": "",  # Berlin Brandenburg Gate
+    "cam_6": "",  # Tokyo Shibuya
+    "cam_7": "",  # Sydney Harbour
+    "cam_8": "",  # Cape Town Table Mountain
+}
+
+CAMERA_NAMES = {
+    "main": "Main Camera (Banjar PTZ)",
+    "cam_2": "Banjar PTZ (Indonesia)",
+    "cam_3": "London Traffic (UK)",
+    "cam_4": "NYC Traffic (US)",
+    "cam_5": "Berlin Brandenburg Gate (DE)",
+    "cam_6": "Tokyo Shibuya (JP)",
+    "cam_7": "Sydney Harbour (AU)",
+    "cam_8": "Cape Town Table Mountain (ZA)",
+}
+
+# Active camera selection (can be changed via /cam command)
+ACTIVE_CAMERA = "main"
 UPDATE_EVERY = float(env.get("SG_UPDATE_EVERY", "2.0"))
 DETECT_EVERY = float(env.get("SG_DETECT_EVERY", "1.5"))
 YELLOW_MIN_FRACTION = float(env.get("SG_YELLOW_MIN_FRACTION", "0.15"))
@@ -79,6 +112,7 @@ L = {
         "zone": "Зона",
         "trigger_frame": "\U0001F4F7 кадр срабатывания",
         "live_frame": "\U0001F4FA живой кадр",
+        "camera": "Камера",
         "yellow_found": "\U0001F697 ОБНАРУЖЕНА ЦЕЛЬ!",
         "threat_gone": "Угроза устранена: цель покинула зону поиска",
         "alarm_off": "\U0001F6A8 Сигнализация отключена.",
@@ -109,121 +143,129 @@ L = {
         "menu_zone": "Зона поиска: /zone N3x4 C9",
         "menu_target": "Цель поиска: /target текст",
         "menu_lang": "Язык: EN/ES/RU",
+        "menu_cam": "Камера: /cam имя",
+        "cam_status": "Камера: {status}",
     },
-    "en": {
-        "alert": "\u26a0\ufe0f WARNING! ALARM! SIGNALING IS ON!\n"
-                 "TURN OFF VIA /togglealarm FROM THE MENU",
-        "mode_title": "\u2699\ufe0f OPERATING MODE",
-        "current_mode": "Current mode",
-        "mode_auto": "\u2705 AUTOMATIC",
-        "mode_manual": "\U0001F6AB MANUAL",
-        "zone_search": "Search zone",
-        "target_search": "Search target",
-        "whole_frame": "whole frame",
-        "row_col": "row {r}, column {c}",
-        "control_hint": "Control: menu next to the clip \u2192 /autoguard, /togglealarm, /zone, /target",
-        "auto_on": "\u2705 AUTO MODE ON",
-        "auto_off": "\U0001F6AB AUTO MODE OFF — MANUAL MODE",
-        "auto_on_detail": "The plug will turn off automatically when the target leaves the zone "
-                          "({n} clean frames). Manual off — /togglealarm.",
-        "manual_only": "The alarm can be turned off only with /togglealarm from the menu.",
-        "alarm_on_manual": "\U0001F6A8 Alarm turned ON manually (/togglealarm). "
-                          "Turn off — /togglealarm again.",
-        "alarm_off_manual": "\U0001F6A8 Alarm turned OFF manually (/togglealarm).",
-        "cam_unavailable": "\u26a0\ufe0f Camera unavailable — can't turn on the alarm.",
-        "force_alarm": "\U0001F6A8 FORCED ALARM (manual)",
-        "looking_for": "Looking for",
-        "zone": "Zone",
-        "trigger_frame": "\U0001F4F7 trigger frame",
-        "live_frame": "\U0001F4FA live frame",
-        "yellow_found": "\U0001F697 TARGET DETECTED!",
-        "threat_gone": "Threat resolved: target left the search zone",
-        "alarm_off": "\U0001F6A8 Alarm turned off.",
-        "auto_active": "\u2705 AUTO MODE ACTIVE",
-        "manual_active": "\U0001F6AB MANUAL MODE ACTIVE",
-        "zone_set": "Search zone set",
-        "zone_off": "Search zone: WHOLE FRAME (zone off).",
-        "zone_help": "Format: /zone N3x4 C9\n"
-                     "\u2022 N{'{'}rows{'}'}x{'{'}cols{'}'} — frame split (1x2, 2x2, 2x3, 3x3, 3x4...)\n"
-                     "\u2022 C{'{'}num{'}'} — cell left-to-right, top-to-bottom (C01..C12)\n"
-                     "\u2022 N9 C5 — square 3x3 grid, cell 5\n"
-                     "\u2022 /zone off — whole frame",
-        "zone_bad": "Couldn't understand format «{arg}». Example: /zone N3x4 C9 (bottom-left cell in a 3-row, 4-column grid).",
-        "target_current": "Current search target",
-        "target_set": "Search target updated",
-        "target_hint": "Set: /target person standing",
-        "target_not_set": "not set (default: yellow vehicle)",
-        "target_filter": "Search filter",
-        "target_filter_kept": "Couldn't recognize color/class - filter kept",
-        "any_color": "any color",
-        "color_filter": "color filter",
-        "lang_title": "\U0001F310 Язык интерфейса / Interface language / Idioma de la interfaz",
-        "lang_set": "Interface language: {lang}",
-        "cb_cancel": "Alarm off",
-        "cb_auto": "Mode switched",
-        "menu_autoguard": "Auto mode: on/off",
-        "menu_togglealarm": "Alarm on/off manually",
-        "menu_zone": "Search zone: /zone N3x4 C9",
-        "menu_target": "Search target: /target text",
-        "menu_lang": "Language: EN/ES/RU",
-    },
-    "es": {
-        "alert": "\u26a0\ufe0f ¡ATENCIÓN! ¡ALARMA! ¡ALARMA ACTIVADA!\n"
-                 "APAGAR CON /togglealarm DESDE EL MENÚ",
-        "mode_title": "\u2699\ufe0f MODO DE FUNCIONAMIENTO",
-        "current_mode": "Modo actual",
-        "mode_auto": "\u2705 AUTOMÁTICO",
-        "mode_manual": "\U0001F6AB MANUAL",
-        "zone_search": "Zona de búsqueda",
-        "target_search": "Objetivo de búsqueda",
-        "whole_frame": "todo el cuadro",
-        "row_col": "fila {r}, columna {c}",
-        "control_hint": "Control: menú junto al clip \u2192 /autoguard, /togglealarm, /zone, /target",
-        "auto_on": "\u2705 MODO AUTO ACTIVADO",
-        "auto_off": "\U0001F6AB MODO AUTO DESACTIVADO — MODO MANUAL",
-        "auto_on_detail": "El enchufe se apagará automáticamente cuando el objetivo salga de la zona "
-                          "({n} cuadros limpios). Apagado manual — /togglealarm.",
-        "manual_only": "La alarma solo se puede apagar con /togglealarm desde el menú.",
-        "alarm_on_manual": "\U0001F6A8 Alarma activada manualmente (/togglealarm). "
-                          "Para apagar — /togglealarm de nuevo.",
-        "alarm_off_manual": "\U0001F6A8 Alarma apagada manualmente (/togglealarm).",
-        "cam_unavailable": "\u26a0\ufe0f Cámara no disponible — no puedo activar la alarma.",
-        "force_alarm": "\U0001F6A8 ALARMA FORZADA (manual)",
-        "looking_for": "Buscando",
-        "zone": "Zona",
-        "trigger_frame": "\U0001F4F7 cuadro de disparo",
-        "live_frame": "\U0001F4FA cuadro en vivo",
-        "yellow_found": "\U0001F697 ¡OBJETIVO DETECTADO!",
-        "threat_gone": "Amenaza resuelta: el objetivo salió de la zona de búsqueda",
-        "alarm_off": "\U0001F6A8 Alarma apagada.",
-        "auto_active": "\u2705 MODO AUTO ACTIVO",
-        "manual_active": "\U0001F6AB MODO MANUAL ACTIVO",
-        "zone_set": "Zona de búsqueda configurada",
-        "zone_off": "Zona de búsqueda: TODO EL CUADRO (zona desactivada).",
-        "zone_help": "Formato: /zone N3x4 C9\n"
-                     "\u2022 N{'{'}filas{'}'}x{'{'}columnas{'}'} — división del cuadro (1x2, 2x2, 2x3, 3x3, 3x4...)\n"
-                     "\u2022 C{'{'}número{'}'} — celda de izquierda a derecha, arriba a abajo (C01..C12)\n"
-                     "\u2022 N9 C5 — cuadrícula cuadrada 3x3, celda 5\n"
-                     "\u2022 /zone off — todo el cuadro",
-        "zone_bad": "No entiendo el formato «{arg}». Ejemplo: /zone N3x4 C9 (celda inferior izquierda en una cuadrícula de 3 filas y 4 columnas).",
-        "target_current": "Objetivo de búsqueda actual",
-        "target_set": "Objetivo de búsqueda actualizado",
-        "target_hint": "Configurar: /target persona de pie",
-        "target_not_set": "no configurado (por defecto: vehículo amarillo)",
-        "target_filter": "Filtro de búsqueda",
-        "target_filter_kept": "No reconocí color/clase - filtro sin cambios",
-        "any_color": "cualquier color",
-        "color_filter": "filtro de color",
-        "lang_title": "\U0001F310 Язык интерфейса / Interface language / Idioma de la interfaz",
-        "lang_set": "Idioma de la interfaz: {lang}",
-        "cb_cancel": "Alarma apagada",
-        "cb_auto": "Modo cambiado",
-        "menu_autoguard": "Modo auto: on/off",
-        "menu_togglealarm": "Alarma on/off manual",
-        "menu_zone": "Zona: /zone N3x4 C9",
-        "menu_target": "Objetivo: /target texto",
-        "menu_lang": "Idioma: EN/ES/RU",
-    },
+            "en": {
+                "alert": "\u26a0\ufe0f WARNING! ALARM! SIGNALING IS ON!\n"
+                         "TURN OFF VIA /togglealarm FROM THE MENU",
+                "mode_title": "\u2699\ufe0f OPERATING MODE",
+                "current_mode": "Current mode",
+                "mode_auto": "\u2705 AUTOMATIC",
+                "mode_manual": "\U0001F6AB MANUAL",
+                "zone_search": "Search zone",
+                "target_search": "Search target",
+                "whole_frame": "whole frame",
+                "row_col": "row {r}, column {c}",
+                "control_hint": "Control: menu next to the clip \u2192 /autoguard, /togglealarm, /zone, /target, /cam",
+                "auto_on": "\u2705 AUTO MODE ON",
+                "auto_off": "\U0001F6AB AUTO MODE OFF — MANUAL MODE",
+                "auto_on_detail": "The plug will turn off automatically when the target leaves the zone "
+                                  "({n} clean frames). Manual off — /togglealarm.",
+                "manual_only": "The alarm can be turned off only with /togglealarm from the menu.",
+                "alarm_on_manual": "\U0001F6A8 Alarm turned ON manually (/togglealarm). "
+                                  "Turn off — /togglealarm again.",
+                "alarm_off_manual": "\U0001F6A8 Alarm turned OFF manually (/togglealarm).",
+                "cam_unavailable": "\u26a0\ufe0f Camera unavailable — can't turn on the alarm.",
+                "force_alarm": "\U0001F6A8 FORCED ALARM (manual)",
+                "looking_for": "Looking for",
+                "zone": "Zone",
+                "trigger_frame": "\U0001F4F7 trigger frame",
+                "live_frame": "\U0001F4FA live frame",
+                "camera": "Camera",
+                "yellow_found": "\U0001F697 TARGET DETECTED!",
+                "threat_gone": "Threat resolved: target left the search zone",
+                "alarm_off": "\U0001F6A8 Alarm turned off.",
+                "auto_active": "\u2705 AUTO MODE ACTIVE",
+                "manual_active": "\U0001F6AB MANUAL MODE ACTIVE",
+                "zone_set": "Search zone set",
+                "zone_off": "Search zone: WHOLE FRAME (zone off).",
+                "zone_help": "Format: /zone N3x4 C9\n"
+                             "\u2022 N{'{'}rows{'}'}x{'{'}cols{'}'} — frame split (1x2, 2x2, 2x3, 3x3, 3x4...)\n"
+                             "\u2022 C{'{'}num{'}'} — cell left-to-right, top-to-bottom (C01..C12)\n"
+                             "\u2022 N9 C5 — square 3x3 grid, cell 5\n"
+                             "\u2022 /zone off — whole frame",
+                "zone_bad": "Couldn't understand format «{arg}». Example: /zone N3x4 C9 (bottom-left cell in a 3-row, 4-column grid).",
+                "target_current": "Current search target",
+                "target_set": "Search target updated",
+                "target_hint": "Set: /target person standing",
+                "target_not_set": "not set (default: yellow vehicle)",
+                "target_filter": "Search filter",
+                "target_filter_kept": "Couldn't recognize color/class - filter kept",
+                "any_color": "any color",
+                "color_filter": "color filter",
+                "lang_title": "\U0001F310 Язык интерфейса / Interface language / Idioma de la interfaz",
+                "lang_set": "Interface language: {lang}",
+                "cb_cancel": "Alarm off",
+                "cb_auto": "Mode switched",
+                "menu_autoguard": "Auto mode: on/off",
+                "menu_togglealarm": "Alarm on/off manually",
+                "menu_zone": "Search zone: /zone N3x4 C9",
+                "menu_target": "Search target: /target text",
+                "menu_lang": "Language: EN/ES/RU",
+                "menu_cam": "Camera: /cam name",
+                            "cam_status": "Camera: {status}",
+                        },
+            "es": {
+                "alert": "\u26a0\ufe0f ¡ATENCIÓN! ¡ALARMA! ¡ALARMA ACTIVADA!\n"
+                         "APAGAR CON /togglealarm DESDE EL MENÚ",
+                "mode_title": "\u2699\ufe0f MODO DE FUNCIONAMIENTO",
+                "current_mode": "Modo actual",
+                "mode_auto": "\u2705 AUTOMÁTICO",
+                "mode_manual": "\U0001F6AB MANUAL",
+                "zone_search": "Zona de búsqueda",
+                "target_search": "Objetivo de búsqueda",
+                "whole_frame": "todo el cuadro",
+                "row_col": "fila {r}, columna {c}",
+                "control_hint": "Control: menú junto al clip \u2192 /autoguard, /togglealarm, /zone, /target, /cam",
+                "auto_on": "\u2705 MODO AUTO ACTIVADO",
+                "auto_off": "\U0001F6AB MODO AUTO DESACTIVADO — MODO MANUAL",
+                "auto_on_detail": "El enchufe se apagará automáticamente cuando el objetivo salga de la zona "
+                                  "({n} cuadros limpios). Apagado manual — /togglealarm.",
+                "manual_only": "La alarma solo se puede apagar con /togglealarm desde el menú.",
+                "alarm_on_manual": "\U0001F6A8 Alarma activada manualmente (/togglealarm). "
+                                  "Para apagar — /togglealarm de nuevo.",
+                "alarm_off_manual": "\U0001F6A8 Alarma apagada manualmente (/togglealarm).",
+                "cam_unavailable": "\u26a0\ufe0f Cámara no disponible — no puedo activar la alarma.",
+                "force_alarm": "\U0001F6A8 ALARMA FORZADA (manual)",
+                "looking_for": "Buscando",
+                "zone": "Zona",
+                "trigger_frame": "\U0001F4F7 cuadro de disparo",
+                "live_frame": "\U0001F4FA cuadro en vivo",
+                "camera": "Cámara",
+                "yellow_found": "\U0001F697 ¡OBJETIVO DETECTADO!",
+                "threat_gone": "Amenaza resuelta: el objetivo salió de la zona de búsqueda",
+                "alarm_off": "\U0001F6A8 Alarma apagada.",
+                "auto_active": "\u2705 MODO AUTO ACTIVO",
+                "manual_active": "\U0001F6AB MODO MANUAL ACTIVO",
+                "zone_set": "Zona de búsqueda configurada",
+                "zone_off": "Zona de búsqueda: TODO EL CUADRO (zona desactivada).",
+                "zone_help": "Formato: /zone N3x4 C9\n"
+                             "\u2022 N{'{'}filas{'}'}x{'{'}columnas{'}'} — división del cuadro (1x2, 2x2, 2x3, 3x3, 3x4...)\n"
+                             "\u2022 C{'{'}número{'}'} — celda de izquierda a derecha, arriba a abajo (C01..C12)\n"
+                             "\u2022 N9 C5 — cuadrícula cuadrada 3x3, celda 5\n"
+                             "\u2022 /zone off — todo el cuadro",
+                "zone_bad": "No entiendo el formato «{arg}». Ejemplo: /zone N3x4 C9 (celda inferior izquierda en una cuadrícula de 3 filas y 4 columnas).",
+                "target_current": "Objetivo de búsqueda actual",
+                "target_set": "Objetivo de búsqueda actualizado",
+                "target_hint": "Configurar: /target persona de pie",
+                "target_not_set": "no configurado (por defecto: vehículo amarillo)",
+                "target_filter": "Filtro de búsqueda",
+                "target_filter_kept": "No reconocí color/clase - filtro sin cambios",
+                "any_color": "cualquier color",
+                "color_filter": "filtro de color",
+                "lang_title": "\U0001F310 Язык интерфейса / Interface language / Idioma de la interfaz",
+                "lang_set": "Idioma de la interfaz: {lang}",
+                "cb_cancel": "Alarma apagada",
+                "cb_auto": "Modo cambiado",
+                "menu_autoguard": "Modo auto: on/off",
+                "menu_togglealarm": "Alarma on/off manual",
+                "menu_zone": "Zona: /zone N3x4 C9",
+                "menu_target": "Objetivo: /target texto",
+                "menu_lang": "Idioma: EN/ES/RU",
+                "menu_cam": "Cámara: /cam nombre",
+                            "cam_status": "Cámara: {status}",
+                        },
 }
 
 def tr(key, **kw):
@@ -415,26 +457,27 @@ def _commands_payload(lang):
         {"command": "togglealarm", "description": L[lang]["menu_togglealarm"]},
         {"command": "zone", "description": L[lang]["menu_zone"]},
         {"command": "target", "description": L[lang]["menu_target"]},
-        {"command": "setlocal", "description": L[lang]["menu_lang"]}])
+        {"command": "setlocal", "description": L[lang]["menu_lang"]},
+        {"command": "cam", "description": L[lang]["menu_cam"]}])
 
 def set_bot_menu():
     """Menu button next to the paperclip: commands for auto mode, alarm control,
-    zone targeting, target description and interface language.
+    zone targeting, target description, interface language, and camera switch.
     Menu follows the bot language chosen via /setlocal (NOT the Telegram
-    client language), so language_code variants are removed first.
+    client language). Sets commands for all 3 supported languages (ru, en, es)
+    so users see commands in their Telegram client language.
     Runs in its own thread - Telegram calls here must NEVER block the poll
     loop (a slow network used to freeze the bot for up to 75s)."""
-    # drop any per-client-language command sets previously registered
+    # set commands for all supported languages so users see them in their client language
     for lc in ("ru", "es", "en"):
         try:
             tg("deleteMyCommands", data={"language_code": lc})
         except Exception as e:
             print(f"  delMyCommands {lc} err: {e}", flush=True)
-    # single default set in the bot's current language
-    try:
-        tg("setMyCommands", data={"commands": _commands_payload(LANG)})
-    except Exception as e:
-        print(f"  setMyCommands err: {e}", flush=True)
+        try:
+            tg("setMyCommands", data={"language_code": lc, "commands": _commands_payload(lc)})
+        except Exception as e:
+            print(f"  setMyCommands {lc} err: {e}", flush=True)
     try:
         tg("setChatMenuButton", data={"chat_id": CHAT_ID,
                                       "menu_button": json.dumps({"type": "commands"})})
@@ -455,12 +498,14 @@ def send_photo(frame_bytes, caption):
     return tg("sendPhoto", files=files, data=data)
 
 def control_text(auto_on):
-    """Current mode + live zone/target data in one message (localized)."""
+    """Current mode + live zone/target/camera data in one message (localized)."""
     mode = tr("mode_auto") if auto_on else tr("mode_manual")
+    cam_name = CAMERA_NAMES.get(CAM_MANAGER.active_name, CAM_MANAGER.active_name)
     txt = (f"{tr('mode_title')}\n\n"
            f"\U0001F4CC {tr('current_mode')}: {mode}\n"
            f"\U0001F4CD {tr('zone_search')}: {zone_label(ZONE)}\n"
-           f"\U0001F50D {tr('target_search')}: {target_label()}\n\n"
+           f"\U0001F50D {tr('target_search')}: {target_label()}\n"
+           f"\U0001F4F7 {tr('cam_status', status=cam_name)}\n\n"
            f"\U0001F4A1 {tr('control_hint')}")
     return txt
 
@@ -485,18 +530,35 @@ def delete_msg(mid):
 def send_text(text):
     return tg("sendMessage", data={"chat_id": CHAT_ID, "text": text})
 
+# TuyaActuator instance (created after config load)
+tuya_actuator = None
+
 # ---------------- plug ----------------
 def plug_set(on):
-    d = tinytuya.Device(PLUG_ID, PLUG_IP, PLUG_KEY, version=3.4)
-    d.set_socketTimeout(5)
-    r = d.set_status(bool(on), 1)
-    print(f"  PLUG {'ON' if on else 'OFF'}: ack={r.get('dps') if isinstance(r, dict) else r}", flush=True)
-    return r
+    global tuya_actuator
+    if tuya_actuator is None:
+        # Fallback to direct tinytuya for backward compatibility during transition
+        d = tinytuya.Device(PLUG_ID, PLUG_IP, PLUG_KEY, version=3.4)
+        d.set_socketTimeout(5)
+        r = d.set_status(bool(on), 1)
+        print(f"  PLUG {'ON' if on else 'OFF'}: ack={r.get('dps') if isinstance(r, dict) else r}", flush=True)
+        return r
+    try:
+        if on:
+            result = tuya_actuator.turn_on()
+        else:
+            result = tuya_actuator.turn_off()
+        print(f"  PLUG {'ON' if on else 'OFF'}: ack={'success' if result else 'failed'}", flush=True)
+        return result
+    except Exception as e:
+        print(f"  PLUG {'ON' if on else 'OFF'} error: {e}", flush=True)
+        return False
 
-# ---------------- camera: continuous bg capture ----------------
+# Camera manager for multi-camera support
 class Camera:
-    def __init__(self, url):
+    def __init__(self, url, name="unknown"):
         self.url = url
+        self.name = name
         self.lock = threading.Lock()
         self.frame = None
         self.alive = False
@@ -524,7 +586,34 @@ class Camera:
         with self.lock:
             return None if self.frame is None else self.frame.copy()
 
-CAM = Camera(CAM_URL)
+class CameraManager:
+    def __init__(self):
+        self.cameras = {}
+        self.active_name = ACTIVE_CAMERA
+        self._init_all()
+    
+    def _init_all(self):
+        for name, url in CAMERA_URLS.items():
+            if not url:
+                print(f"  Camera {name} skipped (no URL configured)")
+                continue
+            print(f"  Initializing camera: {name} ({url})")
+            self.cameras[name] = Camera(url, name=name)
+    
+    def get_active(self):
+        return self.cameras.get(self.active_name)
+    
+    def set_active(self, name):
+        if name in self.cameras:
+            self.active_name = name
+            return True
+        return False
+    
+    def list_cameras(self):
+        return {name: cam.alive for name, cam in self.cameras.items()}
+
+CAM_MANAGER = CameraManager()
+CAM = CAM_MANAGER.get_active()
 MODEL = YOLO("yolo11n.pt")
 
 def color_fraction(frame, box):
@@ -704,8 +793,10 @@ def trigger_alarm(desc, frame):
     # msg A: trigger frame (what YOLO reacted to) - kept as-is, NO button (clean photo)
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     frame_bytes = buf.tobytes()
-    caption = (f"{tr('alert')}\n\n\U0001F4C5 {time.strftime('%H:%M:%S')}\n{desc}"
-               f"\n\U0001F50D {tr('looking_for')}: {target_label()}\n\U0001F4CD {tr('zone')}: {zone_label(ZONE)}\n\n"
+    cam_name = CAMERA_NAMES.get(CAM_MANAGER.active_name, CAM_MANAGER.active_name)
+    caption = (f"{tr('alert')}\n\n\U0001F4C5 {time.strftime('%H:%M:%S')}\n{desc}\n"
+               f"\n\U0001F50D {tr('looking_for')}: {target_label()}\n\U0001F4CD {tr('zone')}: {zone_label(ZONE)}\n"
+               f"\U0001F4F7 {tr('camera')}: {cam_name}\n\n"
                f"\U0001F4F7 {tr('trigger_frame')}")
     files = {"photo": ("frame.jpg", frame_bytes, "image/jpeg")}
     res = tg("sendPhoto", files=files,
@@ -723,7 +814,9 @@ def trigger_alarm(desc, frame):
     if live is None:
         live = frame
     ok, buf = cv2.imencode(".jpg", live, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-    caption = f"{tr('alert')}\n\n\U0001F4C5 {time.strftime('%H:%M:%S')}\n\U0001F4FA {tr('live_frame')}"
+    caption = (f"{tr('alert')}\n\n\U0001F4C5 {time.strftime('%H:%M:%S')}\n"
+               f"\U0001F4FA {tr('live_frame')}\n"
+               f"\U0001F4F7 {tr('camera')}: {cam_name}")
     res = send_photo(buf.tobytes(), caption)
     if res:
         alarm.live_msg_id = res["message_id"]
@@ -884,6 +977,35 @@ def toggle_auto():
                   f"\U0001F50D {tr('target_search')}: {target_label()}\n\n"
                   f"{tr('manual_only')}")
 
+def _handle_cam_cmd(text):
+    """/cam <name> | /cam ? | /cam list | /cam status — switch/list cameras."""
+    global CAM
+    arg = text[len("/cam"):].strip()
+    if not arg or arg.lower() in ("?", "list", "список", "lista"):
+        lines = []
+        for k, v in CAMERA_NAMES.items():
+            cam = CAM_MANAGER.cameras.get(k)
+            status = "🟢" if cam and cam.alive else "🔴"
+            marker = " ←" if k == CAM_MANAGER.active_name else ""
+            lines.append(f"{status} {v} ({k}){marker}")
+        send_text("Доступные камеры:\n" + "\n".join(lines))
+        return
+    if arg.lower() in ("status", "статус", "estado"):
+        lines = []
+        for k, v in CAMERA_NAMES.items():
+            cam = CAM_MANAGER.cameras.get(k)
+            status = "🟢 alive" if cam and cam.alive else "🔴 dead"
+            lines.append(f"{v} ({k}): {status}")
+        send_text("Статус камер:\n" + "\n".join(lines))
+        return
+    if CAM_MANAGER.set_active(arg):
+        CAM = CAM_MANAGER.get_active()
+        send_text(f"Камера переключена: {CAMERA_NAMES.get(arg, arg)}")
+        save_settings()
+        _refresh_control_msg()
+    else:
+        send_text(f"Камера '{arg}' не найдена. /cam ? для списка.")
+
 # ---------------- poll loop ----------------
 def poll_loop():
     offset = 0
@@ -940,6 +1062,8 @@ def _handle_update(upd):
             _handle_zone_cmd(text)
         elif text.startswith("/target"):
             _handle_target_cmd(text)
+        elif text.startswith("/cam"):
+            _handle_cam_cmd(text)
         elif text == "/setlocal" or text == "/setlocal@superguard_alarm_bot":
             tg("sendMessage", data={"chat_id": CHAT_ID,
                                     "text": tr("lang_title"),
@@ -990,6 +1114,14 @@ if __name__ == "__main__":
     kill_other_instances()
     # restore persisted zone/target/lang/auto FIRST - commands must see them
     load_settings()
+    # Initialize TuyaActuator with config
+    tuya_actuator = TuyaActuator({
+        "ip": PLUG_IP,
+        "device_id": PLUG_ID,
+        "local_key": PLUG_KEY,
+        "version": 3.4,
+        "port": 6668,
+    })
     threading.Thread(target=poll_loop, daemon=True).start()
     time.sleep(2)
     # bot menu button (next to paperclip): commands - always available
