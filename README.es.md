@@ -1,3 +1,7 @@
+<div align="center">
+
+![SuperGuard Banner — cyberpunk × Van Gogh × Gaudí](assets/banner-header.png)
+
 # SuperGuard Alarm — Servicio Autónomo de Seguridad IA
 
 **[English](README.md) | [Русский](README.ru.md) | [Español](README.es.md)**
@@ -144,3 +148,13 @@ MIT — use, modifique, despliegue.
 ---
 
 **Master Inquisitor (@RarioArmageddon) · The Grimoire · DarkPushkin/the-grimoire**
+
+---
+
+<div align="center">
+
+![SuperGuard Footer — cyberpunk × Van Gogh × Gaudí](assets/banner-footer.png)
+
+**Protege tu infraestructura. 24/7. Local. Inteligente.**
+
+</div>
