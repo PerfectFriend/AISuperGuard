@@ -1,0 +1,6 @@
+opencv-python==4.10.0
+ultralytics==8.3.0
+tinytuya==1.20.0
+requests==2.33.0
+psutil==6.0.0
+numpy==2.4.3
