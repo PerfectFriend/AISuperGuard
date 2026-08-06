@@ -1,5 +1,7 @@
 # SuperGuard Alarm — Autonomous AI Security Service
 
+**[English](README.md) | [Русский](README.ru.md) | [Español](README.es.md)**
+
 **AI Video Surveillance → Target Detection (YOLO11n + HSV Color + Zones) → Tuya Smart Plug ON → Telegram**
 
 Autonomous security service for Windows. Deploys in one command on a fresh machine.

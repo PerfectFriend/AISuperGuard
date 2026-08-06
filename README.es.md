@@ -1,5 +1,7 @@
 # SuperGuard Alarm — Servicio Autónomo de Seguridad IA
 
+**[English](README.md) | [Русский](README.ru.md) | [Español](README.es.md)**
+
 **Videovigilancia IA → Detección de objetivo (YOLO11n + Color HSV + Zonas) → Enchufe Tuya ON → Telegram**
 
 Servicio de seguridad autónomo para Windows. Despliegue en un comando en máquina limpia.
