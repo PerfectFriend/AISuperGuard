@@ -1,138 +1,146 @@
-<div align="center">
+# SuperGuard Alarm — Autonomous AI Security Service
 
-![SuperGuard Banner — cyberpunk × Van Gogh × Gaudí](assets/banner-header.png)
+**[English](README.md) | [Русский](README.ru.md) | [Español](README.es.md)**
 
-# 🛡️ SUPERGUARD — AI Perimeter & Anti-Theft Surveillance
+**AI Video Surveillance → Target Detection (YOLO11n + HSV Color + Zones) → Tuya Smart Plug ON → Telegram**
 
-**Protección inteligente contra robos, en tiempo real y 100% local.**
+Autonomous security service for Windows. Deploys in one command on a fresh machine.
 
-Persona sospechosa en la zona protegida → detección por IA → foto a Telegram →
-**foco + sirena** vía WiFi. Sin nube, sin suscripción obligatoria, sin falsas alarmas.
+## Features
 
-```
-ES · EN · RU
-```
+- 🎥 **RTSP/HLS Camera** — Any streaming camera (tested: Banjar ATCS Indonesia)
+- 🤖 **YOLO11n Detection** — Cars, buses, trucks, people (GPU: Radeon 780M / ROCm / DirectML)
+- 🎨 **HSV Color Filter** — Target set in free text: `/target red car`, `/target white truck`, `/target person standing`
+- 📍 **Zone Filter** — N×M grid, cells C01..C12: `/zone N3x4 C9`, `/zone off` (whole frame)
+- 🔌 **Tuya Smart Plug (local, tinytuya 3.4)** — Plug activates on trigger
+- 📱 **Telegram Bot (separate token)** — Command menu, trigger photo, live frame 2s, auto-off after 5 clean frames
+- 🌍 **Multi-language** — RU/EN/ES via `/setlocal` (inline buttons), menu follows selected language
+- 💾 **Persistence** — Settings in `sguard_settings.json` survive restarts
+- 🛡 **Self Zombie-Killer** — On start kills stale python.exe panic_mode on same token
+- 🪟 **Windows Service (NSSM)** — Auto-start, logs, restart on crash
 
----
+## Bot Commands (menu next to paperclip)
 
-## 🎯 El problema
+| Command | Description |
+|---------|-------------|
+| `/autoguard` | Toggle auto mode (plug OFF automatically when target leaves) |
+| `/togglealarm` | Manual alarm (plug ON, photo immediately, no YOLO) |
+| `/zone` | Zone: `N3x4 C9`, `N9 C5`, `off`, `?` |
+| `/target` | Target: `red car`, `white truck`, `person standing`, `?` |
+| `/setlocal` | Interface language (RU/EN/ES) |
 
-> Los robos de **cable** (telecom, eléctrico, obra) y las **intrusiones de perímetro**
-> son una plaga en España y Europa. Los ladrones operan rápido, de noche,
-> y las cámaras pasivas solo graban el delito — no lo evitan.
+## Quick Install (on clean Windows 10/11)
 
-**SuperGuard no graba el robo: lo impide.**
-
----
-
-## ⚡ Qué hace
-
-| Señal | Detección |
-|---|---|
-| 🧍 Persona en zona prohibida | YOLO + confirmación en N fotogramas (anti-falsas) |
-| 🪛 Ladrón disfrazado de electricista | **Pértiga aislante (УКН)** + casco + chaleco — análisis de FORMA, funciona de noche |
-| 🚧 Intrusión de perímetro | Persona cruzando el límite → alarma inmediata |
-| 🔦 Reacción física | Foco + sirena vía WiFi (ESP32) — el ladrón huye |
-| 📲 Notificación | Foto + texto a Telegram en < 3 segundos |
-
----
-
-## 🏗️ Arquitectura
-
-```
-[Cámaras IP (RTSP)] → [IA local: YOLO + detector de pértiga] → [confirmación]
-        → [Telegram: foto + texto] + [ESP32: foco + sirena]
-```
-
-```
-        ┌────────────────────────────────────────────────┐
-        │              SUPERGUAARD NODE                  │
-        │                                                │
-        │  RTSP ──▶ YOLO ──▶ detector ──▶ confirmación   │
-        │   (cam)    (IA)     (perímetro)   (2 frames)   │
-        │                                   │            │
-        │        ┌──────────────────────────┤            │
-        │        ▼                          ▼            │
-        │  ┌───────────┐            ┌──────────────┐     │
-        │  │ Telegram  │            │ ESP32: foco  │     │
-        │  │ foto+texto│            │ + sirena     │     │
-        │  └───────────┘            └──────────────┘     │
-        └────────────────────────────────────────────────┘
-```
-
-**100% local**: las imágenes nunca salen de tu red. IA en el propio Mini-PC.
-
----
-
-## 📦 Instalación (un script)
-
-**Windows (PowerShell):**
 ```powershell
-curl.exe -L https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install.ps1 -o install.ps1
-powershell -ExecutionPolicy Bypass -File install.ps1
+# Run as Administrator
+irm https://raw.githubusercontent.com/DarkPushkin/superguard-alarm/main/install_superguard.ps1 | iex
 ```
 
-**Linux/macOS:**
+Or download and run `install_superguard.ps1` with parameters:
+```powershell
+.\install_superguard.ps1 -BotToken "123:ABC" -ChatId "143293811" -PlugIp "192.168.137.109" -PlugKey "abcdef123456..."
+```
+
+## Manual Install
+
+```powershell
+# 1. Python 3.12
+winget install Python.Python.3.12
+
+# 2. Clone
+git clone https://github.com/DarkPushkin/superguard-alarm
+cd superguard-alarm
+
+# 3. Virtual environment
+python -m venv venv
+venv\Scripts\pip install -r requirements.txt
+
+# 4. Config
+copy sguard.env.example sguard.env
+# Edit sguard.env (token, chat_id, plug IP, local_key)
+
+# 5. Run
+venv\Scripts\python panic_mode.py
+```
+
+## Windows Service (Auto-start)
+
+```powershell
+# Install NSSM
+# Create service:
+nssm install SuperGuardAlarm "C:\SuperGuard\venv\Scripts\python.exe" "C:\SuperGuard\panic_mode.py"
+nssm set SuperGuardAlarm AppDirectory "C:\SuperGuard"
+nssm set SuperGuardAlarm Start SERVICE_AUTO_START
+Start-Service SuperGuardAlarm
+```
+
+## Requirements
+
+- Windows 10/11 (x64)
+- Python 3.12
+- GPU with OpenCV support (Radeon 780M / CUDA / DirectML) — **NO CPU fallback**
+- Telegram Bot (create via @BotFather, **SEPARATE token!**)
+- Tuya Smart Plug (flashed locally, tinytuya 3.4, port 6668)
+- RTSP/HLS Camera
+
+## GPU on AMD Radeon 780M (Beelink SER9)
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install.sh | bash
+# Windows ROCm 7.2 — ONLY WORKING PATH
+# WSL2 doesn't work, DirectML segfaults
+pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
 ```
 
-Después:
-```bash
-python scripts/scan_cameras.py                       # encontrar la cámara
-# editar config.yaml: RTSP + Telegram chat_id
-python demo_prototype.py --source rtsp://user:pass@IP:554/stream1
+## Config Files
+
+### `sguard.env` (DO NOT COMMIT!)
 ```
+SG_TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+SG_CHAT_ID=143293811
+SG_PLUG_IP=192.168.137.109
+SG_PLUG_KEY=abcdef1234567890abcdef1234567890
+```
+
+### `sguard_settings.json` (auto-generated)
+```json
+{
+  "zone": [3, 3, 5],
+  "target": "white car",
+  "lang": "es",
+  "auto": true
+}
+```
+
+## Architecture
+
+```
+panic_mode.py (single file, ~1000 lines)
+├── Telegram long-poll (async-safe, 8s timeout, per-update isolation)
+├── YOLO11n + ByteTrack (persist, conf=0.45, imgsz=640)
+├── HSV color filter (11 colors, red=dual range 0-10/170-180)
+├── Zone grid (N×M, orange overlay on frame)
+├── Tuya local (tinytuya 3.4, fresh conn per command)
+├── Alarm state machine (AUTO/MANUAL, 5-frame auto-resolve)
+├── i18n (RU/EN/ES, 48 keys, tr() everywhere)
+├── Self-zombie-killer (PowerShell, psutil PID)
+└── Persistence (JSON, load_settings() FIRST in __main__)
+```
+
+## Bot Messages
+
+**Alarm (msg A)** — trigger frame, bounding box, **NO buttons**, stays forever (audit)  
+**Live (msg B)** — live frame 2s, updates, **deleted on disarm**  
+**Auto-resolve (5 clean frames)** — plug OFF + single message:
+```
+✅ Threat cleared: target left search zone
+🚨 Alarm disarmed.
+📌 Current mode: AUTO, zone=N3x3 C05, target=white car
+```
+
+## License
+
+MIT — use, modify, deploy.
 
 ---
 
-## 🧪 Demo (sin cámara)
-
-```bash
-python demo_prototype.py --source synth --direct
-```
-
-Genera un "ladrón-electricista" sintético (casco + chaleco + pértiga hacia el cable)
-y ejecuta el ciclo completo: detección → Telegram → actuador.
-
----
-
-## 🔌 Actuador ESP32 (foco + sirena)
-
-```
-GPIO2 → relé 1 → FOCO
-GPIO4 → relé 2 → SIRENA
-```
-
-Firmware: `docs/esp32_alarm.ino` (Arduino IDE). El sistema llama a `http://<ip>/on` y `/off`.
-
----
-
-## 🗂️ Estructura
-
-```
-├── demo_prototype.py        # ciclo completo (cámara → alerta → Telegram → ESP32)
-├── electrician_detector.py  # detector "ladrón-electricista" (pértiga + casco + chaleco)
-├── actuator.py              # actuador WiFi: ESP32 / webhook / simulación
-├── surveillance.py          # núcleo multi-cámara (RTSP → zonas → alertas)
-├── scripts/scan_cameras.py  # escáner de cámaras IP
-├── tools/rtsp_preview.py    # vista previa del stream
-├── assets/                  # banners y medios
-└── docs/                    # CAMERA-SETUP.md, esp32_alarm.ino
-```
-
----
-
-## 📄 Licencia
-
-MIT — libre para usar, modificar y vender. El código es tuyo.
-
----
-
-<div align="center">
-
-![SuperGuard Footer — cyberpunk × Van Gogh × Gaudí](assets/banner-footer.png)
-
-**Protege tu infraestructura. 24/7. Local. Inteligente.**
-
-</div>
+**Master Inquisitor (@RarioArmageddon) · The Grimoire · DarkPushkin/the-grimoire**

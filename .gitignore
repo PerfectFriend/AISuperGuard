@@ -1,20 +1,48 @@
 # Python
 __pycache__/
-*.pyc
-.venv/
+*.py[cod]
+*$py.class
+*.so
+.Python
 venv/
+env/
+ENV/
 
-# Конфиг с секретами (шаблон — config.example.yaml)
-config.yaml
+# SuperGuard local config (SECRETS!)
+sguard.env
+sguard_settings.json
 
-# Данные
-alerts/
-logs/
+# Logs
 *.log
-*.jsonl
+superguard.log
+superguard_err.log
 
-# Веса (скачиваются установщиком)
-*.pt
+# OS
+.DS_Store
+Thumbs.db
 
-# Временное
-*.tmp
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test/temp files
+*.jpg
+*.png
+*.bin
+*.html
+frames/
+panic_frames/
+alarm_frames/
+live/
+live2/
+conf_scale/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# PowerShell temp
+kill_zombies.ps1
