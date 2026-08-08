@@ -257,6 +257,38 @@ def test_manual_trigger_manual_mode_waits():
     assert bot.alarm.is_active, "ручная тревога снялась автоматически - баг!"
     bot.alarm.deactivate()
 
+def test_desktop_bridge_writes_state():
+    """При тревоге пишутся desktop_state/status.json и alarm_live.jpg."""
+    import os, json
+    bot = setup_bot()
+    state_dir = bot._state_dir()
+    # чистим старые файлы
+    for f in ("status.json", "alarm_live.jpg"):
+        p = os.path.join(state_dir, f)
+        if os.path.exists(p):
+            os.remove(p)
+    frame = bot.camera_manager.cameras[2].latest
+    bot.trigger_alarm("BRIDGE TEST", frame, cam_id=2)
+    
+    status_path = os.path.join(state_dir, "status.json")
+    assert os.path.exists(status_path), "status.json не создан"
+    with open(status_path, encoding="utf-8") as f:
+        st = json.load(f)
+    assert st["alarm_active"] is True, st
+    assert st["alarm_camera"] == 2, st
+    assert st["active_camera"] == 2, st
+    assert "camera_names" in st and "2" in st["camera_names"]
+    
+    frame_path = os.path.join(state_dir, "alarm_live.jpg")
+    assert os.path.exists(frame_path), "alarm_live.jpg не создан"
+    assert os.path.getsize(frame_path) > 500
+    
+    # снятие -> alarm_active False
+    bot.cancel_alarm()
+    with open(status_path, encoding="utf-8") as f:
+        st2 = json.load(f)
+    assert st2["alarm_active"] is False, st2
+
 print("=" * 60)
 print("SUPERGUARD LIVE-КАДР: ТЕСТ ПРОТОКОЛА БЕЗОПАСНОСТИ")
 print("=" * 60)
@@ -277,6 +309,9 @@ print("\n[5] Ручная тревога")
 check("ручная тревога -> активная камера", test_manual_alarm_uses_active_camera)
 check("ручной триггер сохраняет АВТОрежим (авто-снятие)", test_manual_trigger_auto_mode_preserved)
 check("ручной триггер в РУЧНОМ режиме ждёт отключения", test_manual_trigger_manual_mode_waits)
+
+print("\n[6] Desktop bridge")
+check("status.json + alarm_live.jpg при тревоге", test_desktop_bridge_writes_state)
 
 print("\n" + "=" * 60)
 print(f"ИТОГ: {PASS} PASS, {FAIL} FAIL")

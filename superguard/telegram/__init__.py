@@ -610,6 +610,9 @@ class SuperGuardBot:
         if cam_id:
             self.set_actuators(False, cam_id)
         
+        # Desktop bridge: publish resolved state
+        self.write_status(alarm_active=False)
+        
         # Delete messages (except trigger)
         for mid in result.get("delete_msg_ids", []):
             self.tg.delete_message(self.config.telegram.chat_id, mid)
@@ -653,6 +656,7 @@ class SuperGuardBot:
         self.load_camera_settings()
         self.save_settings()
         self.refresh_control_msg()
+        self.write_status()  # Desktop bridge: active camera changed
         
         name = self.config.cameras.get(cam_id, CameraConfig(cam_id=cam_id, name=f"Camera {cam_id}", url="")).name
         self.tg.send_message(self.config.telegram.chat_id, f"Камера переключена: {name}")
@@ -703,6 +707,10 @@ class SuperGuardBot:
         # Turn on actuators for the triggering camera
         self.set_actuators(True, cam_id)
         
+        # Desktop bridge: publish alarm state + first frame
+        self.write_status()
+        self.write_alarm_frame(frame)
+        
         # Send trigger frame (msg A)
         ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         frame_bytes = buf.tobytes()
@@ -751,6 +759,8 @@ class SuperGuardBot:
                 self.alarm.live_msg_id = res["message_id"]
                 self.alarm.known_msg_ids.add(res["message_id"])
                 self.save_local(buf.tobytes())
+                # Desktop bridge: fresh alarm frame
+                self.write_alarm_frame(live)
                 # Start update loop
                 threading.Thread(target=self._update_loop, daemon=True).start()
         except Exception as e:
@@ -784,6 +794,8 @@ class SuperGuardBot:
             try:
                 if self.tg.edit_message_media(self.config.telegram.chat_id, mid, buf.tobytes(), caption):
                     self.save_local(buf.tobytes())
+                    # Desktop bridge: keep alarm frame fresh
+                    self.write_alarm_frame(frame)
             except Exception as e:
                 print(f"  Live frame update error: {e}")
     
@@ -943,6 +955,52 @@ class SuperGuardBot:
         path = os.path.join(self.frame_dir, f"panic_{ts}_{hashlib.md5(frame_bytes).hexdigest()[:6]}.jpg")
         with open(path, "wb") as f:
             f.write(frame_bytes)
+    
+    # ----- Desktop bridge (desktop_state/status.json + alarm_live.jpg) -----
+    
+    def _state_dir(self) -> str:
+        """Shared directory the desktop app watches."""
+        import os
+        d = os.path.join(os.path.dirname(self.config.base_dir), "desktop_state")
+        os.makedirs(d, exist_ok=True)
+        return d
+    
+    def write_status(self, alarm_active: bool = None):
+        """Write runtime state for the desktop monitor (atomic)."""
+        import os, json
+        d = self._state_dir()
+        settings = self.get_active_settings()
+        plugs = self.actuator_manager.camera_bindings.get(self.active_camera_id, [])
+        state = {
+            "active_camera": self.active_camera_id,
+            "auto_mode": bool(self.alarm.auto_mode),
+            "alarm_active": self.alarm.is_active if alarm_active is None else alarm_active,
+            "alarm_camera": self.alarm.alarm_camera_id,
+            "zone": str(settings.zone) if settings.zone else "",
+            "target": settings.target.description if settings.target and settings.target.description else "",
+            "plugs": list(plugs),
+            "camera_names": {str(k): v.name for k, v in self.config.cameras.items()},
+            "timestamp": time.time(),
+        }
+        tmp = os.path.join(d, "status.json.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False)
+            os.replace(tmp, os.path.join(d, "status.json"))
+        except Exception as e:
+            print(f"  status write error: {e}")
+    
+    def write_alarm_frame(self, frame):
+        """Write the latest alarm frame for the desktop fullscreen window."""
+        import os
+        try:
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if not ok:
+                return
+            with open(os.path.join(self._state_dir(), "alarm_live.jpg"), "wb") as f:
+                f.write(buf.tobytes())
+        except Exception as e:
+            print(f"  alarm frame write error: {e}")
     
     # ----- Poll Loop -----
     
