@@ -8,6 +8,7 @@ venv/
 # Runtime state
 desktop_state/
 saved_frames/
+sguard_settings.json
 *.log
 
 # Desktop build artifacts
