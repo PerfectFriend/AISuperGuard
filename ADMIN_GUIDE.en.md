@@ -15,6 +15,7 @@ Quick setup: adding cameras and plugs, bindings, diagnostics.
 | `sguard.env` | Main config (token, cameras, plugs, parameters) |
 | `superguard\sguard_settings.json` | Bot-changed settings (zone/target/plugs per camera) |
 | `saved_frames\` | Alarm frames |
+| `desktop_state\` | Desktop bridge (status.json + alarm_live.jpg, created at runtime) |
 | `superguard\tests\` | Tests |
 
 ---
@@ -130,7 +131,7 @@ class SonoffActuator(BaseActuator):
         super().__init__(config)
         self.ip = config.get("ip")
         self._base = f"http://{self.ip}/cm"
-    
+   
     def _cmd(self, cmd: str) -> bool:
         import requests
         try:
@@ -138,13 +139,13 @@ class SonoffActuator(BaseActuator):
             return r.status_code == 200 and "POWER" in r.text
         except Exception:
             return False
-    
+   
     def turn_on(self) -> bool:
         return self._cmd("Power%20ON")
-    
+   
     def turn_off(self) -> bool:
         return self._cmd("Power%20OFF")
-    
+   
     def get_status(self) -> bool:
         import requests
         try:
@@ -202,10 +203,61 @@ SG_ACTUATORS=[
 
 ---
 
-## 9. Tests after setup
+## 9. SuperGuard Desktop App (v1.0.0)
+
+### What it does
+Single `.exe` (25 MB) that:
+- **Self-heals on startup** — checks Python, venv, pip packages, YOLO11n model, `sguard.env`, paths, repairs what's broken
+- **Full config UI** — 7 tabs (General/Telegram/Cameras/Plugs/Paths/Advanced/About), atomic `.env` writes
+- **Runs SuperGuard core** as subprocess with health monitoring (auto-restart, log tail)
+- **System tray** — eye + lightning icon, menu: Show / Settings / Test alarm / Status / Exit
+- **Fullscreen alarm window** — auto-expands on alarm, red pulse border, live frame (2 Hz), camera/zone/target/plugs, countdown, "Dismiss"
+- **Desktop bridge** — polls `desktop_state/status.json` + `alarm_live.jpg` written by SuperGuard core
+
+### Installation
+```powershell
+# Run as Administrator
+irm https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install_desktop.ps1 | iex
+```
+
+Or download `SuperGuardDesktop-v1.0.0.exe` from [Releases](https://github.com/PerfectFriend/AISuperGuard/releases/tag/v1.0.0).
+
+### Architecture
+```
+desktop/
+├── main.py           # Orchestrator
+├── self_heal.py      # Environment check & repair
+├── config_ui.py      # tkinter 7-tab config
+├── tray.py           # pystray system tray
+├── monitor.py        # 1s poll: status/alarm/frame events
+├── bridge.py         # Reads desktop_state/status.json + alarm_live.jpg
+├── alarm_window.py   # Fullscreen alarm UI
+├── icon.py           # PIL: eye + lightning → ICO
+├── build.ps1         # PyInstaller build
+└── tests/            # 19 tests total
+```
+
+### Build from source
+```powershell
+cd desktop
+.\build.ps1
+# Output: dist/SuperGuardDesktop.exe (25 MB)
+```
+
+---
+
+## 10. Tests after setup
 
 ```bash
 python superguard\tests\test_all.py              # 11 checks
 python superguard\tests\test_live_update.py      # 7 checks live-frame protocol
 python superguard\tests\test_plug_active_cam.py  # 8 checks active camera and /plug
+```
+
+Desktop app:
+```bash
+python desktop\tests\test_icon.py             # 4 checks
+python desktop\tests\test_self_heal.py        # 5 checks
+python desktop\tests\test_config_ui.py        # 5 checks
+python desktop\tests\test_monitor.py          # 5 checks
 ```

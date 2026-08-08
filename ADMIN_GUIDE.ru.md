@@ -1,10 +1,10 @@
 # 🛠️ SuperGuard Alarm — Руководство администратора
 
-Краткое руководство по настройке: добавление камер и розеток, привязка, диагностика.
+Быстрая настройка: добавление камер и розеток, привязки, диагностика.
 
-> **Важно:** перед правкой конфигурации **остановите** бота, иначе он перезапишет
-> файлы из памяти: `taskkill /F /IM python.exe` (или через автозапуск-скрипт).
-> Порядок всегда такой: **стоп → правим → старт**.
+> **Важно:** **остановите** бота перед редактированием конфига, иначе он перезапишет
+> файлы из памяти: `taskkill /F /IM python.exe` (или через autostart-скрипт).
+> Всегда: **стоп → правка → старт**.
 
 ---
 
@@ -12,34 +12,35 @@
 
 | Файл | Назначение |
 |---|---|
-| `sguard.env` | Основная конфигурация (токен, камеры, розетки, параметры) |
-| `superguard\sguard_settings.json` | Настройки, изменяемые через бота (зона/цель/розетки по камерам) |
+| `sguard.env` | Главный конфиг (токен, камеры, розетки, параметры) |
+| `superguard\sguard_settings.json` | Настройки, меняемые ботом (зона/цель/розетки по камерам) |
 | `saved_frames\` | Кадры тревог |
+| `desktop_state\` | Desktop bridge (status.json + alarm_live.jpg, создаётся при запуске) |
 | `superguard\tests\` | Тесты |
 
 ---
 
 ## 2. Добавление камеры
 
-Камеры задаются в `sguard.env` через переменные `SG_CAM{N}_URL` и `SG_CAM{N}_NAME`.
+Камеры задаются в `sguard.env` через `SG_CAM{N}_URL` и `SG_CAM{N}_NAME`.
 
 ### Шаг 1 — выберите номер камеры (2–32)
-Камера 1 задаётся переменной `SG_CAM_URL` (HLS). Остальные — `SG_CAM2_URL` … `SG_CAM32_URL`.
+Камера 1 задаётся через `SG_CAM_URL` (HLS). Остальные: `SG_CAM2_URL` … `SG_CAM32_URL`.
 
 ### Шаг 2 — добавьте строки в `sguard.env`
 
 ```ini
 # HLS-поток
 SG_CAM5_URL=https://example.com/live/stream.m3u8
-SG_CAM5_NAME=5: Пример HLS
+SG_CAM5_NAME=5: Example HLS
 
 # RTSP-камера (локальная PoE)
 SG_CAM6_URL=rtsp://admin:password@192.168.1.50:554/cam/realmonitor?channel=1&subtype=0
-SG_CAM6_NAME=6: Уличная камера
+SG_CAM6_NAME=6: Outdoor camera
 
 # JPG-снимок (периодически обновляется)
 SG_CAM7_URL=https://example.com/camera/snapshot.jpg
-SG_CAM7_NAME=7: Снимок
+SG_CAM7_NAME=7: Snapshot
 ```
 
 ### Шаг 3 — перезапустите бота
@@ -47,26 +48,26 @@ SG_CAM7_NAME=7: Снимок
 - `.jpg` / `.jpeg` / `.png` / `snapshot` / `image` → JPG-камера (HTTP-снимок)
 - `.m3u8` / `rtsp://` → потоковая камера (cv2.VideoCapture, авто-переподключение)
 
-### Шаг 4 — проверьте
-В Telegram: `/cam` — камера должна появиться в списке, `/cam 6` — сделать активной,
+### Шаг 4 — проверка
+В Telegram: `/cam` — камера должна появиться в списке; `/cam 6` — сделать её активной;
 `/cam status` — статус (🟢 alive / 🔴 dead).
 
 ---
 
-## 3. Добавление розетки Tuya (локальное управление)
+## 3. Добавление розетки Tuya (локальный контроль)
 
 Розетки Tuya управляются **локально** через библиотеку tinytuya (протокол 3.4, порт 6668).
 
 ### Шаг 1 — получите данные розетки
-Данные берутся из приложения **Smart Life** или панели Tuya IoT:
+Данные берутся из приложения **Smart Life** или платформы Tuya IoT:
 
 | Поле | Что это | Где взять |
 |---|---|---|
-| `device_id` | ID устройства | Туя IoT Platform → устройство |
-| `local_key` | Локальный ключ | Туя IoT Platform → устройство |
+| `device_id` | ID устройства | Tuya IoT Platform → device |
+| `local_key` | Локальный ключ | Tuya IoT Platform → device |
 | `ip` | IP розетки в локальной сети | роутер / `nmap` / `ip auto` |
-| `version` | Версия протокола (3.4 / 3.3 / 3.1) | Туя IoT Platform |
-| `port` | Порт (обычно 6668) | стандарт |
+| `version` | Версия протокола (3.4 / 3.3 / 3.1) | Tuya IoT Platform |
+| `port` | Порт (обычно 6668) | стандартный |
 
 ### Шаг 2 — добавьте розетку в `SG_ACTUATORS`
 
@@ -81,45 +82,45 @@ SG_ACTUATORS=[
 ]
 ```
 
-- `"ip": "auto"` — IP будет найден автоматически через Tuya Cloud (см. раздел 4)
+- `"ip": "auto"` — IP обнаруживается автоматически через Tuya Cloud (см. раздел 4)
 - `cameras` — начальная привязка: какие камеры управляют этой розеткой
 
-### Шаг 3 — проверьте
+### Шаг 3 — проверка
 В Telegram: `/plug` — розетка должна быть 🟢 ONLINE; `/plug test` — тест с авто-переподключением.
 
 ---
 
-## 4. Tuya Cloud (автообнаружение IP розеток)
+## 4. Tuya Cloud (авто-обнаружение IP розеток)
 
-Если IP розетки меняется (DHCP), укажите ключи OpenAPI — синхронизация каждые 5 минут
+Если IP розетки меняется (DHCP), укажите OpenAPI-ключи — синхронизация каждые 5 минут
 найдёт розетку по `device_id` и обновит IP в конфиге и `.env`:
 
 ```ini
-TUYA_ACCESS_ID=ваш_access_id
-TUYA_ACCESS_SECRET=ваш_access_secret
+TUYA_ACCESS_ID=your_access_id
+TUYA_ACCESS_SECRET=your_access_secret
 TUYA_REGION=eu        # cn / us / eu / in
 TUYA_SCHEMA=smartlife
 ```
 
-Регион — тот, в котором зарегистрирован аккаунт Smart Life.
+Region — регион, где зарегистрирован аккаунт Smart Life.
 
 ---
 
 ## 5. Привязка розеток к камере через Telegram
 
 1. Переключитесь на камеру: `/cam N`
-2. Привяжите розетки по номерам: `/plug 1 2` (будут управлять plug1 и plug2)
-3. Проверка: `/plug` — покажет привязки активной камеры
+2. Привяжите розетки по номеру: `/plug 1 2` (будут управлять plug1 и plug2)
+3. Проверьте: `/plug` — показывает привязки активной камеры
 
-При тревоге с этой камеры включаются **все** привязанные розетки, при снятии — выключаются.
+При тревоге с этой камеры **все** привязанные розетки включаются; при снятии — выключаются.
 Привязки сохраняются в `sguard_settings.json` и восстанавливаются при старте.
 
 ---
 
-## 6. Добавление розетки другого типа (Sonoff, Shelly, ESPHome, Zigbee)
+## 6. Добавление другого типа розетки (Sonoff, Shelly, ESPHome, Zigbee)
 
-Архитектура актуаторов расширяемая: `BaseActuator` (интерфейс) + `ActuatorRegistry`
-(реестр типов). Сейчас реализован тип `tuya`; остальные добавляются классом-наследником:
+Архитектура актуаторов расширяема: `BaseActuator` (интерфейс) + `ActuatorRegistry`
+(реестр типов). Тип `tuya` реализован; остальные добавляются как подкласс:
 
 ### Шаг 1 — создайте класс в `superguard/actuators/__init__.py`
 
@@ -130,7 +131,7 @@ class SonoffActuator(BaseActuator):
         super().__init__(config)
         self.ip = config.get("ip")
         self._base = f"http://{self.ip}/cm"
-    
+   
     def _cmd(self, cmd: str) -> bool:
         import requests
         try:
@@ -138,13 +139,13 @@ class SonoffActuator(BaseActuator):
             return r.status_code == 200 and "POWER" in r.text
         except Exception:
             return False
-    
+   
     def turn_on(self) -> bool:
         return self._cmd("Power%20ON")
-    
+   
     def turn_off(self) -> bool:
         return self._cmd("Power%20OFF")
-    
+   
     def get_status(self) -> bool:
         import requests
         try:
@@ -169,7 +170,7 @@ SG_ACTUATORS=[
 ]
 ```
 
-`type` должно совпадать с именем, зарегистрированным в реестре (`register("sonoff", …)`).
+`type` должен совпадать с именем в реестре (`register("sonoff", …)`).
 
 ### Шаг 3 — перезапустите и проверьте `/plug test`
 
@@ -177,15 +178,15 @@ SG_ACTUATORS=[
 
 ## 7. Параметры детекции (тонкая настройка)
 
-| Переменная | По умолчанию | Смысл |
+| Переменная | Default | Значение |
 |---|---|---|
-| `SG_UPDATE_EVERY` | 2.0 | Интервал кадров камер / обновления live-кадра в Telegram |
+| `SG_UPDATE_EVERY` | 2.0 | Интервал кадров камеры / период live-frame в Telegram |
 | `SG_DETECT_EVERY` | 1.5 | Интервал цикла детекции |
 | `SG_MIN_CONF` | 0.35 | Мин. уверенность YOLO |
 | `SG_YELLOW_MIN_FRACTION` | 0.15 | Мин. доля пикселей цвета в боксе |
-| `SG_MIN_YELLOW_VEHICLES` | 1 | Мин. совпадений для «хита» |
-| `SG_REQUIRE_FRAMES` | 2 | Кадров подряд для тревоги |
-| `SG_AUTO_RESOLVE_FRAMES` | 5 | Чистых кадров для автоснятия |
+| `SG_MIN_YELLOW_VEHICLES` | 1 | Мин. совпадений для «hit» |
+| `SG_REQUIRE_FRAMES` | 2 | Кадров подряд для триггера |
+| `SG_AUTO_RESOLVE_FRAMES` | 5 | Чистых кадров для авто-снятия |
 
 ---
 
@@ -194,18 +195,69 @@ SG_ACTUATORS=[
 | Симптом | Решение |
 |---|---|
 | Камера 🔴 dead | Проверьте URL, сеть, доступность. Для RTSP — камера в той же подсети |
-| Розетка OFFLINE | IP изменился → Tuya Cloud (`ip: auto`) или `/plug test` |
-| `409 Conflict` Telegram | Зомби-процесс с тем же токеном → перезапуск, отдельный бот для SuperGuard |
-| `404` от Telegram API | Неверный токен в `sguard.env` |
-| Live-кадр не обновляется | Проверьте `SG_UPDATE_EVERY`, сеть до камеры |
-| Изменения конфига не применились | Не перезапустили бота (см. предупреждение в начале) |
+| Розетка OFFLINE | IP сменился → Tuya Cloud (`ip: auto`) или `/plug test` |
+| `409 Conflict` Telegram | Зомби-процесс с тем же токеном → рестарт, отдельный бот для SuperGuard |
+| `404` от Telegram API | Неправильный токен в `sguard.env` |
+| Live-frame не обновляется | Проверьте `SG_UPDATE_EVERY`, сеть до камеры |
+| Изменения конфига не применяются | Бот не перезапущен (см. предупреждение вверху) |
 
 ---
 
-## 9. Тесты после настройки
+## 9. SuperGuard Desktop App (v1.0.0)
+
+### Что делает
+Один `.exe` (25 MB), который:
+- **Self-heal при старте** — проверяет Python, venv, pip-пакеты, модель YOLO11n, `sguard.env`, пути, чинит сломанное
+- **Полный UI конфигурации** — 7 вкладок (General/Telegram/Cameras/Plugs/Paths/Advanced/About), атомарная запись `.env`
+- **Запускает SuperGuard core** как подпроцесс с health-monitoring (авто-рестарт, хвост логов)
+- **System tray** — иконка глаз+молния, меню: Show / Settings / Test alarm / Status / Exit
+- **Fullscreen окно тревоги** — авто-разворачивается при тревоге, красная пульсирующая рамка, live-кадр (2 Hz), камера/зона/цель/розетки, обратный отсчёт, кнопка "Dismiss"
+- **Desktop bridge** — опрашивает `desktop_state/status.json` + `alarm_live.jpg`, которые пишет SuperGuard core
+
+### Установка
+```powershell
+# Run as Administrator
+irm https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install_desktop.ps1 | iex
+```
+
+Или скачайте `SuperGuardDesktop-v1.0.0.exe` с [Releases](https://github.com/PerfectFriend/AISuperGuard/releases/tag/v1.0.0).
+
+### Архитектура
+```
+desktop/
+├── main.py           # Оркестратор
+├── self_heal.py      # Проверка и ремонт окружения
+├── config_ui.py      # tkinter 7-tab конфиг
+├── tray.py           # pystray system tray
+├── monitor.py        # 1s poll: события status/alarm/frame
+├── bridge.py         # Читает desktop_state/status.json + alarm_live.jpg
+├── alarm_window.py   # Fullscreen UI тревоги
+├── icon.py           # PIL: глаз + молния → ICO
+├── build.ps1         # PyInstaller build
+└── tests/            # 19 тестов всего
+```
+
+### Сборка из исходников
+```powershell
+cd desktop
+.\build.ps1
+# Output: dist/SuperGuardDesktop.exe (25 MB)
+```
+
+---
+
+## 10. Тесты после настройки
 
 ```bash
 python superguard\tests\test_all.py              # 11 проверок
-python superguard\tests\test_live_update.py      # 7 проверок протокола live-кадра
-python superguard\tests\test_plug_active_cam.py  # 8 проверок активной камеры и /plug
+python superguard\tests\test_live_update.py      # 7 проверок live-frame протокол
+python superguard\tests\test_plug_active_cam.py  # 8 проверок активная камера и /plug
+```
+
+Desktop app:
+```bash
+python desktop\tests\test_icon.py             # 4 проверки
+python desktop\tests\test_self_heal.py        # 5 проверок
+python desktop\tests\test_config_ui.py        # 5 проверок
+python desktop\tests\test_monitor.py          # 5 проверок
 ```

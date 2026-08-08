@@ -8,7 +8,7 @@ Vigilancia por vídeo con IA y respuesta mediante enchufes inteligentes, control
 
 **Detección YOLO → filtro de color HSV → filtro de zona → enchufe Tuya ON → alarma en Telegram**
 
-[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Guía de administrador](ADMIN_GUIDE.es.md)
+[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Guía de administrador](ADMIN_GUIDE.es.md) · [Desktop App](desktop/)
 
 </div>
 
@@ -31,25 +31,82 @@ Vigilancia por vídeo con IA y respuesta mediante enchufes inteligentes, control
 
 ---
 
+## 🖥️ SuperGuard Desktop App (v1.0.0)
+
+**Launcher y monitor autónomo para Windows** — un solo `.exe` (25 MB) que:
+
+1. **Auto-reparación al inicio** — comprueba Python, venv, paquetes pip (numpy, opencv, ultralytics, torch, tinytuya, requests, psutil, pycryptodome, pyaes), modelo YOLO11n, `sguard.env`, rutas, repara lo que está roto
+2. **UI completa de configuración** — 7 pestañas: General, Telegram, Cameras, Plugs, Paths, Advanced, About (tkinter, escritura atómica `.env`)
+3. **Ejecuta SuperGuard core** como subproceso con health-monitoring (reinicio en crash, tail de logs)
+4. **System tray icon** — ojo + rayo (cyberpunk × Van Gogh × Gaudí), menú: Show / Settings / Test alarm / Status / Exit
+5. **Auto-expande a fullscreen en alarma** — borde rojo pulsante, live-frame (2 Hz), cámara/zona/objetivo/enchufes, cuenta atrás, botón "Dismiss"
+6. **Desktop bridge** — sondea `desktop_state/status.json` + `alarm_live.jpg` escritos por SuperGuard core (sin sockets, cero deps)
+
+### Instalación (un comando, Run as Administrator)
+
+```powershell
+irm https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install_desktop.ps1 | iex
+```
+
+O descargue desde [Releases](https://github.com/PerfectFriend/AISuperGuard/releases/tag/v1.0.0): `SuperGuardDesktop-v1.0.0.exe`
+
+### Arquitectura Desktop
+
+```
+C:\SuperGuard\
+├── sguard.env                    # Toda la configuración (token, cámaras, enchufes)
+├── sguard_settings.json          # Ajustes runtime (zona/objetivo/enchufes por cámara)
+├── saved_frames\                 # Archivo de fotogramas de alarma
+├── desktop_state\                # Bridge: status.json + alarm_live.jpg (creado en runtime)
+├── mjpeg_stream_server.py        # Vista en navegador (puerto 8081)
+├── requirements.txt
+├── superguard\                   # Core package (modular)
+│   ├── main.py                   # Punto de entrada, SuperGuardApplication
+│   ├── config.py                 # Carga y validación de config
+│   ├── models\                   # Zone, Target, CameraSettings, Alarm (state machine)
+│   ├── detectors\                # Pipeline: YOLO + HSV color + zone
+│   ├── cameras\                  # Cámaras JPG/HLS/RTSP, CameraManager
+│   ├── actuators\                # Abstracción enchufes (Tuya…), registro, ActuatorManager
+│   ├── telegram\                 # Cliente Telegram, router comandos, bot
+│   ├── storage\                  # JSON atómico, EnvWriter
+│   ├── tuya_cloud\               # Tuya Cloud sync (auto-descubrimiento IP enchufes)
+│   └── tests\                    # test_all.py, test_live_update.py, test_plug_active_cam.py
+├── desktop\                      # Fuente Desktop app
+│   ├── main.py                   # Orquestador: self-heal → config → tray → monitor → SuperGuard
+│   ├── self_heal.py              # Comprobación y reparación del entorno
+│   ├── config_ui.py              # tkinter 7-tab configuración
+│   ├── tray.py                   # pystray system tray
+│   ├── monitor.py                # 1s poll: on_status, on_alarm_on, on_alarm_off, on_new_frame
+│   ├── bridge.py                 # Lee desktop_state/status.json + alarm_live.jpg
+│   ├── alarm_window.py           # Fullscreen alarma: borde rojo, live-frame, cuenta atrás, Dismiss
+│   ├── icon.py                   # PIL generador: ojo + rayo → 256² PNG + multi-res ICO
+│   ├── build.ps1                 # PyInstaller build script
+│   ├── install_desktop.ps1       # One-command installer
+│   └── tests\                    # test_icon.py, test_self_heal.py, test_config_ui.py, test_monitor.py
+└── install_desktop.ps1           # Root installer (copia de desktop/)
+```
+
+---
+
 ## 🏗️ Arquitectura
 
 ```
 C:\SuperGuard\
 ├── sguard.env                    # Toda la configuración (token, cámaras, enchufes)
-├── sguard_settings.json          # Ajustes (zona/objetivo/enchufes por cámara)
+├── sguard_settings.json          # Ajustes runtime (zona/objetivo/enchufes por cámara)
 ├── saved_frames\                 # Archivo de fotogramas de alarma
 ├── mjpeg_stream_server.py        # Vista en navegador (puerto 8081)
 ├── requirements.txt
 └── superguard\
     ├── main.py                   # Punto de entrada, SuperGuardApplication
-    ├── config.py                 # Carga y validación de configuración
-    ├── models\                   # Zone, Target, CameraSettings, Alarm (máquina de estados)
-    ├── detectors\                # Pipeline: YOLO + color HSV + zona
+    ├── config.py                 # Carga y validación de config
+    ├── models\                   # Zone, Target, CameraSettings, Alarm (state machine)
+    ├── detectors\                # Pipeline: YOLO + HSV color + zone
     ├── cameras\                  # Cámaras JPG/HLS/RTSP, CameraManager
-    ├── actuators\                # Abstracción de enchufes (Tuya…), registro, ActuatorManager
-    ├── telegram\                 # Cliente Telegram, enrutador de comandos, bot
-    ├── storage\                  # Almacenamiento JSON atómico, EnvWriter
-    ├── tuya_cloud\               # Sincronización Tuya Cloud (IP automática de enchufes)
+    ├── actuators\                # Abstracción enchufes (Tuya…), registro, ActuatorManager
+    ├── telegram\                 # Cliente Telegram, router comandos, bot
+    ├── storage\                  # JSON atómico, EnvWriter
+    ├── tuya_cloud\               # Tuya Cloud sync (auto-descubrimiento IP enchufes)
     └── tests\                    # test_all.py, test_live_update.py, test_plug_active_cam.py
 ```
 
@@ -128,12 +185,14 @@ El tipo de cámara se elige automáticamente por URL: `.jpg/.jpeg/.png` → cám
 | `/cam` | Lista/estado de cámaras, cambiar cámara activa (`/cam 3`) |
 
 ### Formato de zona
+
 - `N{rows}x{cols} C{cell}` — cuadrícula rows×cols, número de celda (1 = arriba-izquierda)
   `/zone N3x4 C9` → cuadrícula 3×4, celda 9
 - `N{total} C{cell}` — cuadrícula cuadrada: `/zone N9 C5` = 3×3, celda 5
 - `off` / `всё` / `0` / `todo` / `nada` — todo el cuadro
 
 ### Formato de objetivo
+
 `/target <texto>` — palabras de clase + palabras de color:
 - Clases: `person`, `car`, `bus`, `truck`, `bicycle`, `motorcycle`…
 - Colores: `red`, `blue`, `yellow`, `green`, `black`, `white`…
@@ -156,6 +215,7 @@ El tipo de cámara se elige automáticamente por URL: `.jpg/.jpeg/.png` → cám
 ```bash
 python mjpeg_stream_server.py
 ```
+
 - `http://localhost:8081/` — flujo MJPEG
 - `http://localhost:8081/snapshot.jpg` — fotograma único
 
@@ -167,6 +227,14 @@ python mjpeg_stream_server.py
 python superguard\tests\test_all.py           # 11 comprobaciones: sintaxis, config, modelos, cámaras, actuadores, app
 python superguard\tests\test_live_update.py   # 7 comprobaciones: protocolo de fotograma en vivo
 python superguard\tests\test_plug_active_cam.py  # 8 comprobaciones: cámara activa, /plug, vinculaciones
+```
+
+Desktop app tests:
+```bash
+python desktop\tests\test_icon.py             # 4 comprobaciones
+python desktop\tests\test_self_heal.py        # 5 comprobaciones
+python desktop\tests\test_config_ui.py        # 5 comprobaciones
+python desktop\tests\test_monitor.py          # 5 comprobaciones
 ```
 
 ---

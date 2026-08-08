@@ -8,7 +8,7 @@ AI-powered video surveillance with smart-plug response and Telegram control.
 
 **YOLO object detection → HSV color filter → zone filter → Tuya smart plug ON → Telegram alarm**
 
-[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Admin Guide](ADMIN_GUIDE.en.md)
+[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Admin Guide](ADMIN_GUIDE.en.md) · [Desktop App](desktop/)
 
 </div>
 
@@ -28,6 +28,63 @@ AI-powered video surveillance with smart-plug response and Telegram control.
 - **Resilience** — camera auto-reconnect, plug auto-reconnect (`/plug test`), zombie-process killer, atomic settings storage, Tuya Cloud IP auto-discovery
 - **Browser live view** — built-in MJPEG server (`http://localhost:8081`)
 - **26 automated checks** — syntax, config, models, cameras, actuators, alarm protocol, live-frame updates
+
+---
+
+## 🖥️ SuperGuard Desktop App (v1.0.0)
+
+**Autonomous Windows launcher & monitor** — single `.exe` (25 MB) that:
+
+1. **Self-heals on startup** — checks Python, venv, pip packages (numpy, opencv, ultralytics, torch, tinytuya, requests, psutil, pycryptodome, pyaes), YOLO11n model, `sguard.env`, paths, repairs what's broken
+2. **Full configuration UI** — 7 tabs: General, Telegram, Cameras, Plugs, Paths, Advanced, About (tkinter, atomic `.env` writes)
+3. **Runs SuperGuard core** as subprocess with health monitoring (restart on crash, log tail)
+4. **System tray icon** — eye + lightning bolt (cyberpunk × Van Gogh × Gaudí), menu: Show / Settings / Test alarm / Status / Exit
+5. **Auto-expands to fullscreen alarm window** on alarm — red pulsing border, live frame (2 Hz), camera/zone/target/plugs, countdown, "Dismiss"
+6. **Desktop bridge** — polls `desktop_state/status.json` + `alarm_live.jpg` written by SuperGuard core (no sockets, zero deps)
+
+### Installation (one command, Run as Administrator)
+
+```powershell
+irm https://raw.githubusercontent.com/PerfectFriend/AISuperGuard/main/install_desktop.ps1 | iex
+```
+
+Or download from [Releases](https://github.com/PerfectFriend/AISuperGuard/releases/tag/v1.0.0): `SuperGuardDesktop-v1.0.0.exe`
+
+### Desktop Architecture
+
+```
+C:\SuperGuard\
+├── sguard.env                    # All configuration (token, cameras, plugs)
+├── sguard_settings.json          # Runtime settings (per-camera zone/target/plugs)
+├── saved_frames\                 # Alarm frame archive
+├── desktop_state\                # Bridge: status.json + alarm_live.jpg (created at runtime)
+├── mjpeg_stream_server.py        # Browser live view (port 8081)
+├── requirements.txt
+├── superguard\                   # Core package (modular)
+│   ├── main.py                   # Entry point, SuperGuardApplication
+│   ├── config.py                 # Config loading & validation
+│   ├── models\                   # Zone, Target, CameraSettings, Alarm (state machine)
+│   ├── detectors\                # YOLO + HSV color + zone pipeline
+│   ├── cameras\                  # JPG/HLS/RTSP cameras, CameraManager
+│   ├── actuators\                # Plug abstraction (Tuya…), registry, ActuatorManager
+│   ├── telegram\                 # Telegram client, command router, bot
+│   ├── storage\                  # Atomic JSON settings, .env writer
+│   ├── tuya_cloud\               # Tuya Cloud sync (plug IP auto-discovery)
+│   └── tests\                    # test_all.py, test_live_update.py, test_plug_active_cam.py
+├── desktop\                      # Desktop app source
+│   ├── main.py                   # Orchestrator: self-heal → config → tray → monitor → SuperGuard
+│   ├── self_heal.py              # Environment check & repair
+│   ├── config_ui.py              # tkinter 7-tab configuration
+│   ├── tray.py                   # pystray system tray
+│   ├── monitor.py                # 1s poll: on_status, on_alarm_on, on_alarm_off, on_new_frame
+│   ├── bridge.py                 # Reads desktop_state/status.json + alarm_live.jpg
+│   ├── alarm_window.py           # Fullscreen alarm: red border, live frame, countdown, Dismiss
+│   ├── icon.py                   # PIL generator: eye + lightning → 256² PNG + multi-res ICO
+│   ├── build.ps1                 # PyInstaller build script
+│   ├── install_desktop.ps1       # One-command installer
+│   └── tests\                    # test_icon.py, test_self_heal.py, test_config_ui.py, test_monitor.py
+└── install_desktop.ps1           # Root installer (copied from desktop/)
+```
 
 ---
 
@@ -130,12 +187,14 @@ Camera types are chosen automatically by URL: `.jpg/.jpeg/.png` → JPG camera; 
 | `/cam` | Camera list/status, switch active camera (`/cam 3`) |
 
 ### Zone format
+
 - `N{rows}x{cols} C{cell}` — grid rows×cols, cell number (1 = top-left)
   `/zone N3x4 C9` → 3×4 grid, cell 9
 - `N{total} C{cell}` — square grid: `/zone N9 C5` = 3×3, cell 5
 - `off` / `всё` / `0` / `todo` / `nada` — whole frame
 
 ### Target format
+
 `/target <text>` — class words + color words:
 - Classes: `person`, `car`, `bus`, `truck`, `bicycle`, `motorcycle`…
 - Colors: `red`, `blue`, `yellow`, `green`, `black`, `white`…
@@ -158,6 +217,7 @@ Camera types are chosen automatically by URL: `.jpg/.jpeg/.png` → JPG camera; 
 ```bash
 python mjpeg_stream_server.py
 ```
+
 - `http://localhost:8081/` — MJPEG stream
 - `http://localhost:8081/snapshot.jpg` — single frame
 
@@ -169,6 +229,14 @@ python mjpeg_stream_server.py
 python superguard\tests\test_all.py           # 11 checks: syntax, config, models, cameras, actuators, app
 python superguard\tests\test_live_update.py   # 7 checks: live-frame update protocol
 python superguard\tests\test_plug_active_cam.py  # 8 checks: active camera, /plug, alarm bindings
+```
+
+Desktop app tests:
+```bash
+python desktop\tests\test_icon.py             # 4 checks
+python desktop\tests\test_self_heal.py        # 5 checks
+python desktop\tests\test_config_ui.py        # 5 checks
+python desktop\tests\test_monitor.py          # 5 checks
 ```
 
 ---
