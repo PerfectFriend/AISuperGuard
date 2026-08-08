@@ -74,7 +74,7 @@ class ColorFilter:
                          Default: yellow only.
         """
         if color_ranges is None:
-            self.ranges = [(self.DEFAULT_YELLOW_LOW.tolist(), self.DEFAULT_YELLOW_HIGH.tolist())]
+            self.ranges = [(self.DEFAULT_YELLOW_LOW, self.DEFAULT_YELLOW_HIGH)]
         else:
             self.ranges = [
                 (np.array(low, dtype=np.uint8), np.array(high, dtype=np.uint8))

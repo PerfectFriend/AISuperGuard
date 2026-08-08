@@ -132,7 +132,10 @@ class TelegramClient:
         return result is not None
     
     def get_updates(self, offset: int, timeout: int = 25) -> Optional[Dict]:
-        return self.call("getUpdates", offset=offset, timeout=timeout)
+        result = self.call("getUpdates", offset=offset, timeout=timeout)
+        if isinstance(result, list):
+            return {"result": result}
+        return {"result": []}
 
 
 # ============================================================================
