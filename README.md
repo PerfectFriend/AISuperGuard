@@ -2,148 +2,186 @@
 
 ![SuperGuard Banner — cyberpunk × Van Gogh × Gaudí](assets/banner-header.png)
 
-# SuperGuard Alarm — Autonomous AI Security Service
+# 🛡️ SuperGuard Alarm
 
-**[English](README.md) | [Русский](README.ru.md) | [Español](README.es.md)**
+AI-powered video surveillance with smart-plug response and Telegram control.
 
-**AI Video Surveillance → Target Detection (YOLO11n + HSV Color + Zones) → Tuya Smart Plug ON → Telegram**
+**YOLO object detection → HSV color filter → zone filter → Tuya smart plug ON → Telegram alarm**
 
-Autonomous security service for Windows. Deploys in one command on a fresh machine.
+[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Admin Guide (RU)](ADMIN_GUIDE.md)
 
-## Features
+</div>
 
-- 🎥 **RTSP/HLS Camera** — Any streaming camera (tested: Banjar ATCS Indonesia)
-- 🤖 **YOLO11n Detection** — Cars, buses, trucks, people (GPU: Radeon 780M / ROCm / DirectML)
-- 🎨 **HSV Color Filter** — Target set in free text: `/target red car`, `/target white truck`, `/target person standing`
-- 📍 **Zone Filter** — N×M grid, cells C01..C12: `/zone N3x4 C9`, `/zone off` (whole frame)
-- 🔌 **Tuya Smart Plug (local, tinytuya 3.4)** — Plug activates on trigger
-- 📱 **Telegram Bot (separate token)** — Command menu, trigger photo, live frame 2s, auto-off after 5 clean frames
-- 🌍 **Multi-language** — RU/EN/ES via `/setlocal` (inline buttons), menu follows selected language
-- 💾 **Persistence** — Settings in `sguard_settings.json` survive restarts
-- 🛡 **Self Zombie-Killer** — On start kills stale python.exe panic_mode on same token
-- 🪟 **Windows Service (NSSM)** — Auto-start, logs, restart on crash
+---
 
-## Bot Commands (menu next to paperclip)
+## ✨ Features
 
-| Command | Description |
-|---------|-------------|
-| `/autoguard` | Toggle auto mode (plug OFF automatically when target leaves) |
-| `/togglealarm` | Manual alarm (plug ON, photo immediately, no YOLO) |
-| `/zone` | Zone: `N3x4 C9`, `N9 C5`, `off`, `?` |
-| `/target` | Target: `red car`, `white truck`, `person standing`, `?` |
-| `/setlocal` | Interface language (RU/EN/ES) |
+- **8+ cameras** — HLS streams, RTSP (local PoE cameras), HTTP JPG snapshots — all monitored simultaneously
+- **AI detection** — YOLO11n (Ultralytics) with object tracking; filter by class (car, person, bus, truck…) and color (red, yellow, blue… via HSV)
+- **Zone filter** — limit detection to a grid cell: `N3x4 C9` = 3×4 grid, cell 9
+- **Active camera** — commands (`/zone`, `/target`, `/plug`) always work with the active camera. A camera becomes active on alarm or via `/cam`, and stays active until another camera takes over
+- **Smart plugs** — Tuya plugs controlled locally (tinytuya), bind any number of plugs to a camera: `/plug 1 2 3`
+- **Alarm protocol** — trigger frame (audit, never deleted) + live frame **updated every 2 s** from the alarm camera until the alarm is resolved
+- **Auto-resolve** — in auto mode the alarm cancels itself when the target leaves the zone; in manual mode it waits for `/togglealarm`
+- **Manual trigger** — `/togglealarm` for admin testing; duplicates automatic alarm behavior (respects auto/manual mode)
+- **Telegram bot** — full control via commands, inline buttons, 3 languages (EN/ES/RU)
+- **Resilience** — camera auto-reconnect, plug auto-reconnect (`/plug test`), zombie-process killer, atomic settings storage, Tuya Cloud IP auto-discovery
+- **Browser live view** — built-in MJPEG server (`http://localhost:8081`)
+- **26 automated checks** — syntax, config, models, cameras, actuators, alarm protocol, live-frame updates
 
-## Quick Install (on clean Windows 10/11)
+---
 
-```powershell
-# Run as Administrator
-irm https://raw.githubusercontent.com/DarkPushkin/superguard-alarm/main/install_superguard.ps1 | iex
+## 🏗️ Architecture
+
+```
+C:\SuperGuard\
+├── sguard.env                    # All configuration (token, cameras, plugs)
+├── sguard_settings.json          # Runtime settings (per-camera zone/target/plugs)
+├── saved_frames\                 # Alarm frame archive
+├── mjpeg_stream_server.py        # Browser live view (port 8081)
+├── requirements.txt
+└── superguard\
+    ├── main.py                   # Entry point, SuperGuardApplication
+    ├── config.py                 # Config loading & validation
+    ├── models\                   # Zone, Target, CameraSettings, Alarm (state machine)
+    ├── detectors\                # YOLO + HSV color + zone pipeline
+    ├── cameras\                  # JPG/HLS/RTSP cameras, CameraManager
+    ├── actuators\                # Plug abstraction (Tuya…), registry, ActuatorManager
+    ├── telegram\                 # Telegram client, command router, bot
+    ├── storage\                  # Atomic JSON settings, .env writer
+    ├── tuya_cloud\               # Tuya Cloud sync (plug IP auto-discovery)
+    └── tests\                    # test_all.py, test_live_update.py, test_plug_active_cam.py
 ```
 
-Or download and run `install_superguard.ps1` with parameters:
-```powershell
-.\install_superguard.ps1 -BotToken "123:ABC" -ChatId "143293811" -PlugIp "192.168.137.109" -PlugKey "abcdef123456..."
+### Detection pipeline
+
+```
+Camera (JPG/HLS/RTSP) → frame → YOLO11n → zone filter → class filter → HSV color filter
+   ↓ target found N frames in a row (require_frames)
+ALARM: plug(s) ON → Telegram: trigger frame (msg A)
+   → 1 s later: live frame (msg B), updated every update_every s
+   ↓ target gone (auto_resolve_frames clean frames + auto mode)
+plug(s) OFF → "Threat resolved" notification
 ```
 
-## Manual Install
+### Alarm state machine
 
-```powershell
-# 1. Python 3.12
-winget install Python.Python.3.12
-
-# 2. Clone
-git clone https://github.com/DarkPushkin/superguard-alarm
-cd superguard-alarm
-
-# 3. Virtual environment
-python -m venv venv
-venv\Scripts\pip install -r requirements.txt
-
-# 4. Config
-copy sguard.env.example sguard.env
-# Edit sguard.env (token, chat_id, plug IP, local_key)
-
-# 5. Run
-venv\Scripts\python panic_mode.py
+```
+INACTIVE ──(target N frames)──▶ ACTIVE ──(auto mode + N clean)──▶ AUTO_RESOLVING
+   ▲                                │                                 │
+   │                                │◀──(target re-detected)───────────┘
+   └────(/togglealarm or button)────┘
 ```
 
-## Windows Service (Auto-start)
+---
 
-```powershell
-# Install NSSM
-# Create service:
-nssm install SuperGuardAlarm "C:\SuperGuard\venv\Scripts\python.exe" "C:\SuperGuard\panic_mode.py"
-nssm set SuperGuardAlarm AppDirectory "C:\SuperGuard"
-nssm set SuperGuardAlarm Start SERVICE_AUTO_START
-Start-Service SuperGuardAlarm
-```
-
-## Requirements
-
-- Windows 10/11 (x64)
-- Python 3.12
-- GPU with OpenCV support (Radeon 780M / CUDA / DirectML) — **NO CPU fallback**
-- Telegram Bot (create via @BotFather, **SEPARATE token!**)
-- Tuya Smart Plug (flashed locally, tinytuya 3.4, port 6668)
-- RTSP/HLS Camera
-
-## GPU on AMD Radeon 780M (Beelink SER9)
+## 🚀 Quick start
 
 ```bash
-# Windows ROCm 7.2 — ONLY WORKING PATH
-# WSL2 doesn't work, DirectML segfaults
-pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
+git clone <repo-url> superguard
+cd superguard
+pip install -r requirements.txt
+
+# 1. Create bot with @BotFather, put token in sguard.env
+# 2. Configure cameras & plugs in sguard.env (see Admin Guide)
+python superguard\main.py
 ```
 
-## Config Files
+**Windows note:** run `python superguard\main.py`; the bot installs its command menu automatically.
 
-### `sguard.env` (DO NOT COMMIT!)
+---
+
+## ⚙️ Configuration (`sguard.env`)
+
+| Variable | Purpose |
+|---|---|
+| `SG_TELEGRAM_BOT_TOKEN` | Bot token (must be a **separate** bot from your gateway bot) |
+| `SG_CHAT_ID` | Telegram chat ID for alarms |
+| `SG_PLUG_KEY` | Tuya local key (backward-compat default plug) |
+| `SG_CAM_URL` | Camera 1 URL (HLS) |
+| `SG_CAM2_URL` … `SG_CAM32_URL` | Cameras 2–32 (add/override without code changes) |
+| `SG_CAM{N}_NAME` | Optional display name for camera N |
+| `SG_UPDATE_EVERY` | Frame refresh interval (s) — live frame update period |
+| `SG_DETECT_EVERY` | Detection loop interval (s) |
+| `SG_MIN_CONF` | YOLO confidence threshold |
+| `SG_YELLOW_MIN_FRACTION` | Min color-pixel fraction in a box |
+| `SG_MIN_YELLOW_VEHICLES` | Min matches to count a "hit" |
+| `SG_REQUIRE_FRAMES` | Consecutive hit frames to trigger alarm |
+| `SG_AUTO_RESOLVE_FRAMES` | Clean frames to auto-cancel alarm |
+| `SG_ACTUATORS` | JSON array of plugs (`name`, `type`, `cameras`, `ip`, `device_id`, `local_key`, `version`, `port`) |
+| `TUYA_ACCESS_ID` / `TUYA_ACCESS_SECRET` | Tuya Cloud OpenAPI keys (plug IP auto-discovery) |
+
+Camera types are chosen automatically by URL: `.jpg/.jpeg/.png` → JPG camera; `.m3u8`/`rtsp://` → stream camera.
+
+---
+
+## 🤖 Telegram commands
+
+| Command | Action |
+|---|---|
+| `/autoguard` | Toggle auto mode on/off |
+| `/togglealarm` | Manual alarm on/off (admin test trigger) |
+| `/zone` | `/zone N3x4 C9` set zone, `/zone off` whole frame, `/zone ?` help |
+| `/target` | `/target red car` set target, `/target ?` help |
+| `/plug` | Show plugs of the active camera |
+| `/plug 1 2 3` | Bind plugs plug1..plug3 to the **active** camera |
+| `/plug test` | Test plugs, auto-reconnect failed |
+| `/setlocal` | Language EN/ES/RU (inline buttons) |
+| `/cam` | Camera list/status, switch active camera (`/cam 3`) |
+
+### Zone format
+- `N{rows}x{cols} C{cell}` — grid rows×cols, cell number (1 = top-left)
+  `/zone N3x4 C9` → 3×4 grid, cell 9
+- `N{total} C{cell}` — square grid: `/zone N9 C5` = 3×3, cell 5
+- `off` / `всё` / `0` / `todo` / `nada` — whole frame
+
+### Target format
+`/target <text>` — class words + color words:
+- Classes: `person`, `car`, `bus`, `truck`, `bicycle`, `motorcycle`…
+- Colors: `red`, `blue`, `yellow`, `green`, `black`, `white`…
+- Example: `/target red car`
+
+---
+
+## 🔌 Plug bindings
+
+- Plugs are configured in `SG_ACTUATORS` (type `tuya`, protocol 3.4, port 6668)
+- Bind plugs to a camera: switch to it (`/cam N`), then `/plug 1 2` (numbers → `plug1`, `plug2`)
+- On alarm from that camera, **all bound plugs** turn ON; on resolve, they turn OFF
+- Bindings persist in `sguard_settings.json` and are restored on start
+- `"ip": "auto"` + Tuya Cloud keys → plug IP discovered automatically (every 5 min)
+
+---
+
+## 🖥️ Browser live view
+
+```bash
+python mjpeg_stream_server.py
 ```
-SG_TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-SG_CHAT_ID=143293811
-SG_PLUG_IP=192.168.137.109
-SG_PLUG_KEY=abcdef1234567890abcdef1234567890
+- `http://localhost:8081/` — MJPEG stream
+- `http://localhost:8081/snapshot.jpg` — single frame
+
+---
+
+## 🧪 Tests
+
+```bash
+python superguard\tests\test_all.py           # 11 checks: syntax, config, models, cameras, actuators, app
+python superguard\tests\test_live_update.py   # 7 checks: live-frame update protocol
+python superguard\tests\test_plug_active_cam.py  # 8 checks: active camera, /plug, alarm bindings
 ```
 
-### `sguard_settings.json` (auto-generated)
-```json
-{
-  "zone": [3, 3, 5],
-  "target": "white car",
-  "lang": "es",
-  "auto": true
-}
-```
+---
 
-## Architecture
+## 🛠️ Admin Guide
 
-```
-panic_mode.py (single file, ~1000 lines)
-├── Telegram long-poll (async-safe, 8s timeout, per-update isolation)
-├── YOLO11n + ByteTrack (persist, conf=0.45, imgsz=640)
-├── HSV color filter (11 colors, red=dual range 0-10/170-180)
-├── Zone grid (N×M, orange overlay on frame)
-├── Tuya local (tinytuya 3.4, fresh conn per command)
-├── Alarm state machine (AUTO/MANUAL, 5-frame auto-resolve)
-├── i18n (RU/EN/ES, 48 keys, tr() everywhere)
-├── Self-zombie-killer (PowerShell, psutil PID)
-└── Persistence (JSON, load_settings() FIRST in __main__)
-```
+Full setup — adding cameras, adding plugs of all supported types — see [ADMIN_GUIDE.md](ADMIN_GUIDE.md) (Russian).
 
-## Bot Messages
+---
 
-**Alarm (msg A)** — trigger frame, bounding box, **NO buttons**, stays forever (audit)  
-**Live (msg B)** — live frame 2s, updates, **deleted on disarm**  
-**Auto-resolve (5 clean frames)** — plug OFF + single message:
-```
-✅ Threat cleared: target left search zone
-🚨 Alarm disarmed.
-📌 Current mode: AUTO, zone=N3x3 C05, target=white car
-```
+## 📄 License
 
-## License
-
-MIT — use, modify, deploy.
+MIT
 
 ---
 

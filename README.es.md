@@ -2,148 +2,184 @@
 
 ![SuperGuard Banner — cyberpunk × Van Gogh × Gaudí](assets/banner-header.png)
 
-# SuperGuard Alarm — Servicio Autónomo de Seguridad IA
+# 🛡️ SuperGuard Alarm
 
-**[English](README.md) | [Русский](README.ru.md) | [Español](README.es.md)**
+Vigilancia por vídeo con IA y respuesta mediante enchufes inteligentes, controlada desde Telegram.
 
-**Videovigilancia IA → Detección de objetivo (YOLO11n + Color HSV + Zonas) → Enchufe Tuya ON → Telegram**
+**Detección YOLO → filtro de color HSV → filtro de zona → enchufe Tuya ON → alarma en Telegram**
 
-Servicio de seguridad autónomo para Windows. Despliegue en un comando en máquina limpia.
+[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Guía de administrador (RU)](ADMIN_GUIDE.md)
 
-## Características
+</div>
 
-- 🎥 **Cámara RTSP/HLS** — Cualquier cámara streaming (test: Banjar ATCS Indonesia)
-- 🤖 **Detección YOLO11n** — Coches, autobuses, camiones, personas (GPU: Radeon 780M / ROCm / DirectML)
-- 🎨 **Filtro color HSV** — Objetivo en texto libre: `/target coche rojo`, `/target white truck`, `/target persona de pie`
-- 📍 **Filtro zonal** — Cuadrícula N×M, celdas C01..C12: `/zone N3x4 C9`, `/zone off` (todo el frame)
-- 🔌 **Tuya Smart Plug (local, tinytuya 3.4)** — Enchufe se activa al detectar
-- 📱 **Bot Telegram (token separado)** — Menú comandos, foto disparo, live frame 2s, auto-apagado 5 frames limpios
-- 🌍 **Multi-idioma** — RU/EN/ES via `/setlocal` (botones inline), menú sigue idioma elegido
-- 💾 **Persistencia** — Ajustes en `sguard_settings.json` sobreviven reinicios
-- 🛡 **Auto-protección zombis** — Al iniciar mata python.exe panic_mode viejos en mismo token
-- 🪟 **Windows Service (NSSM)** — Auto-inicio, logs, reinicio en crash
+---
 
-## Comandos del bot (menú junto al clip)
+## ✨ Características
 
-| Comando | Descripción |
-|---------|-------------|
-| `/autoguard` | Activar/desactivar modo auto (enchufe OFF solo al irse objetivo) |
-| `/togglealarm` | Alarma manual (enchufe ON, foto inmediata, sin YOLO) |
-| `/zone` | Zona: `N3x4 C9`, `N9 C5`, `off`, `?` |
-| `/target` | Objetivo: `coche rojo`, `white truck`, `persona de pie`, `?` |
-| `/setlocal` | Idioma interfaz (RU/EN/ES) |
+- **8+ cámaras** — flujos HLS, RTSP (cámaras PoE locales), capturas JPG por HTTP — monitorización simultánea
+- **Detección IA** — YOLO11n (Ultralytics) con seguimiento; filtro por clase (coche, persona, autobús, camión…) y color (rojo, amarillo, azul… vía HSV)
+- **Filtro de zona** — limitar la detección a una celda de la cuadrícula: `N3x4 C9` = cuadrícula 3×4, celda 9
+- **Cámara activa** — los comandos (`/zone`, `/target`, `/plug`) siempre trabajan con la cámara activa. Una cámara se vuelve activa al disparar una alarma o vía `/cam`, y permanece activa hasta que otra la reemplace
+- **Enchufes inteligentes** — Tuya, control local (tinytuya); se pueden vincular varios enchufes a una cámara: `/plug 1 2 3`
+- **Protocolo de alarma** — fotograma de disparo (auditoría, nunca se borra) + fotograma en vivo **actualizado cada 2 s** desde la cámara de la alarma hasta la resolución
+- **Auto-resolución** — en modo automático la alarma se cancela sola cuando el objetivo sale de la zona; en modo manual espera `/togglealarm`
+- **Disparo manual** — `/togglealarm` para pruebas del administrador; duplica el comportamiento de la alarma automática (respeta modo auto/manual)
+- **Bot de Telegram** — control total por comandos, botones inline, 3 idiomas (EN/ES/RU)
+- **Resiliencia** — reconexión automática de cámaras y enchufes (`/plug test`), eliminador de procesos zombi, almacenamiento atómico, auto-descubrimiento de IP de enchufes vía Tuya Cloud
+- **Vista en navegador** — servidor MJPEG integrado (`http://localhost:8081`)
+- **26 comprobaciones automáticas** — sintaxis, configuración, modelos, cámaras, actuadores, protocolo de alarma, actualización del fotograma en vivo
 
-## Instalación rápida (Windows 10/11 limpio)
+---
 
-```powershell
-# Como Administrador
-irm https://raw.githubusercontent.com/DarkPushkin/superguard-alarm/main/install_superguard.ps1 | iex
+## 🏗️ Arquitectura
+
+```
+C:\SuperGuard\
+├── sguard.env                    # Toda la configuración (token, cámaras, enchufes)
+├── sguard_settings.json          # Ajustes (zona/objetivo/enchufes por cámara)
+├── saved_frames\                 # Archivo de fotogramas de alarma
+├── mjpeg_stream_server.py        # Vista en navegador (puerto 8081)
+├── requirements.txt
+└── superguard\
+    ├── main.py                   # Punto de entrada, SuperGuardApplication
+    ├── config.py                 # Carga y validación de configuración
+    ├── models\                   # Zone, Target, CameraSettings, Alarm (máquina de estados)
+    ├── detectors\                # Pipeline: YOLO + color HSV + zona
+    ├── cameras\                  # Cámaras JPG/HLS/RTSP, CameraManager
+    ├── actuators\                # Abstracción de enchufes (Tuya…), registro, ActuatorManager
+    ├── telegram\                 # Cliente Telegram, enrutador de comandos, bot
+    ├── storage\                  # Almacenamiento JSON atómico, EnvWriter
+    ├── tuya_cloud\               # Sincronización Tuya Cloud (IP automática de enchufes)
+    └── tests\                    # test_all.py, test_live_update.py, test_plug_active_cam.py
 ```
 
-O descargue y ejecute `install_superguard.ps1` con parámetros:
-```powershell
-.\install_superguard.ps1 -BotToken "123:ABC" -ChatId "143293811" -PlugIp "192.168.137.109" -PlugKey "abcdef123456..."
+### Pipeline de detección
+
+```
+Cámara (JPG/HLS/RTSP) → fotograma → YOLO11n → filtro de zona → filtro de clase → color HSV
+   ↓ objetivo encontrado N fotogramas seguidos (require_frames)
+ALARMA: enchufe(s) ON → Telegram: fotograma de disparo (msg A)
+   → 1 s después: fotograma en vivo (msg B), actualizado cada update_every s
+   ↓ objetivo se fue (auto_resolve_frames fotogramas limpios + modo auto)
+enchufe(s) OFF → notificación «Amenaza resuelta»
 ```
 
-## Instalación manual
+### Máquina de estados de alarma
 
-```powershell
-# 1. Python 3.12
-winget install Python.Python.3.12
-
-# 2. Clonar
-git clone https://github.com/DarkPushkin/superguard-alarm
-cd superguard-alarm
-
-# 3. Entorno virtual
-python -m venv venv
-venv\Scripts\pip install -r requirements.txt
-
-# 4. Config
-copy sguard.env.example sguard.env
-# Edite sguard.env (token, chat_id, IP enchufe, local_key)
-
-# 5. Ejecutar
-venv\Scripts\python panic_mode.py
+```
+INACTIVE ──(objetivo N fotogramas)──▶ ACTIVE ──(modo auto + N limpios)──▶ AUTO_RESOLVING
+   ▲                                      │                                   │
+   │                                      │◀──(objetivo reaparece)────────────┘
+   └────(/togglealarm o botón)────────────┘
 ```
 
-## Servicio Windows (auto-inicio)
+---
 
-```powershell
-# Instale NSSM
-# Cree servicio:
-nssm install SuperGuardAlarm "C:\SuperGuard\venv\Scripts\python.exe" "C:\SuperGuard\panic_mode.py"
-nssm set SuperGuardAlarm AppDirectory "C:\SuperGuard"
-nssm set SuperGuardAlarm Start SERVICE_AUTO_START
-Start-Service SuperGuardAlarm
-```
-
-## Requisitos
-
-- Windows 10/11 (x64)
-- Python 3.12
-- GPU con soporte OpenCV (Radeon 780M / CUDA / DirectML) — **SIN fallback CPU**
-- Bot Telegram (cree via @BotFather, **¡token SEPARADO!**)
-- Tuya Smart Plug (flasheado local, tinytuya 3.4, puerto 6668)
-- Cámara RTSP/HLS
-
-## GPU en AMD Radeon 780M (Beelink SER9)
+## 🚀 Inicio rápido
 
 ```bash
-# Windows ROCm 7.2 — ÚNICO camino funcional
-# WSL2 no funciona, DirectML — segfault
-pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
+git clone <repo-url> superguard
+cd superguard
+pip install -r requirements.txt
+
+# 1. Crea un bot con @BotFather, pon el token en sguard.env
+# 2. Configura cámaras y enchufes en sguard.env (ver Guía de administrador)
+python superguard\main.py
 ```
 
-## Archivos de configuración
+---
 
-### `sguard.env` (¡NO COMITEAR!)
+## ⚙️ Configuración (`sguard.env`)
+
+| Variable | Propósito |
+|---|---|
+| `SG_TELEGRAM_BOT_TOKEN` | Token del bot (**bot separado**, no el bot gateway) |
+| `SG_CHAT_ID` | ID del chat de Telegram para alarmas |
+| `SG_PLUG_KEY` | Clave local Tuya (enchufe por defecto, compatibilidad) |
+| `SG_CAM_URL` | URL de la cámara 1 (HLS) |
+| `SG_CAM2_URL` … `SG_CAM32_URL` | Cámaras 2–32 (añadir/sobrescribir sin tocar código) |
+| `SG_CAM{N}_NAME` | Nombre visible de la cámara N |
+| `SG_UPDATE_EVERY` | Intervalo de refresco de fotogramas (s) — periodo del fotograma en vivo |
+| `SG_DETECT_EVERY` | Intervalo del bucle de detección (s) |
+| `SG_MIN_CONF` | Umbral de confianza YOLO |
+| `SG_YELLOW_MIN_FRACTION` | Fracción mínima de píxeles de color en la caja |
+| `SG_MIN_YELLOW_VEHICLES` | Coincidencias mínimas para un «hit» |
+| `SG_REQUIRE_FRAMES` | Fotogramas seguidos para disparar la alarma |
+| `SG_AUTO_RESOLVE_FRAMES` | Fotogramas limpios para auto-cancelar |
+| `SG_ACTUATORS` | Array JSON de enchufes (`name`, `type`, `cameras`, `ip`, `device_id`, `local_key`, `version`, `port`) |
+| `TUYA_ACCESS_ID` / `TUYA_ACCESS_SECRET` | Claves Tuya Cloud OpenAPI (auto-descubrimiento de IP) |
+
+El tipo de cámara se elige automáticamente por URL: `.jpg/.jpeg/.png` → cámara JPG; `.m3u8`/`rtsp://` → cámara de flujo.
+
+---
+
+## 🤖 Comandos de Telegram
+
+| Comando | Acción |
+|---|---|
+| `/autoguard` | Alternar modo automático |
+| `/togglealarm` | Alarma manual on/off (disparo de prueba del administrador) |
+| `/zone` | `/zone N3x4 C9` definir zona, `/zone off` todo el cuadro, `/zone ?` ayuda |
+| `/target` | `/target red car` definir objetivo, `/target ?` ayuda |
+| `/plug` | Mostrar enchufes de la cámara activa |
+| `/plug 1 2 3` | Vincular enchufes plug1..plug3 a la **cámara activa** |
+| `/plug test` | Probar enchufes, reconectar fallidos |
+| `/setlocal` | Idioma EN/ES/RU (botones inline) |
+| `/cam` | Lista/estado de cámaras, cambiar cámara activa (`/cam 3`) |
+
+### Formato de zona
+- `N{rows}x{cols} C{cell}` — cuadrícula rows×cols, número de celda (1 = arriba-izquierda)
+  `/zone N3x4 C9` → cuadrícula 3×4, celda 9
+- `N{total} C{cell}` — cuadrícula cuadrada: `/zone N9 C5` = 3×3, celda 5
+- `off` / `всё` / `0` / `todo` / `nada` — todo el cuadro
+
+### Formato de objetivo
+`/target <texto>` — palabras de clase + palabras de color:
+- Clases: `person`, `car`, `bus`, `truck`, `bicycle`, `motorcycle`…
+- Colores: `red`, `blue`, `yellow`, `green`, `black`, `white`…
+- Ejemplo: `/target red car`
+
+---
+
+## 🔌 Vinculación de enchufes
+
+- Los enchufes se definen en `SG_ACTUATORS` (tipo `tuya`, protocolo 3.4, puerto 6668)
+- Vincular a una cámara: cámbiala (`/cam N`), luego `/plug 1 2` (números → `plug1`, `plug2`)
+- En alarma de esa cámara se encienden **todos los enchufes vinculados**; al resolverse, se apagan
+- Las vinculaciones se guardan en `sguard_settings.json` y se restauran al iniciar
+- `"ip": "auto"` + claves Tuya Cloud → IP del enchufe descubierta automáticamente (cada 5 min)
+
+---
+
+## 🖥️ Vista en navegador
+
+```bash
+python mjpeg_stream_server.py
 ```
-SG_TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-SG_CHAT_ID=143293811
-SG_PLUG_IP=192.168.137.109
-SG_PLUG_KEY=abcdef1234567890abcdef1234567890
+- `http://localhost:8081/` — flujo MJPEG
+- `http://localhost:8081/snapshot.jpg` — fotograma único
+
+---
+
+## 🧪 Pruebas
+
+```bash
+python superguard\tests\test_all.py           # 11 comprobaciones: sintaxis, config, modelos, cámaras, actuadores, app
+python superguard\tests\test_live_update.py   # 7 comprobaciones: protocolo de fotograma en vivo
+python superguard\tests\test_plug_active_cam.py  # 8 comprobaciones: cámara activa, /plug, vinculaciones
 ```
 
-### `sguard_settings.json` (auto-generado)
-```json
-{
-  "zone": [3, 3, 5],
-  "target": "white car",
-  "lang": "es",
-  "auto": true
-}
-```
+---
 
-## Arquitectura
+## 🛠️ Guía de administrador
 
-```
-panic_mode.py (archivo único, ~1000 líneas)
-├── Telegram long-poll (async-safe, timeout 8s, aislamiento por update)
-├── YOLO11n + ByteTrack (persist, conf=0.45, imgsz=640)
-├── Filtro color HSV (11 colores, red=rango dual 0-10/170-180)
-├── Cuadrícula zonas (N×M, overlay naranja en frame)
-├── Tuya local (tinytuya 3.4, conexión fresca por comando)
-├── Máquina estados alarma (AUTO/MANUAL, 5-frames auto-resolve)
-├── i18n (RU/EN/ES, 48 claves, tr() en todo)
-├── Auto-mata-zombis (PowerShell, psutil PID)
-└── Persistencia (JSON, load_settings() PRIMERO en __main__)
-```
+Configuración completa — añadir cámaras, añadir enchufes de todos los tipos soportados — en [ADMIN_GUIDE.md](ADMIN_GUIDE.md) (ruso).
 
-## Mensajes del bot
+---
 
-**Alarma (msg A)** — frame disparo, bbox, **SIN botones**, queda para siempre (auditoría)  
-**Live (msg B)** — frame vivo 2s, actualiza, **se borra al desactivar**  
-**Auto-resolve (5 frames limpios)** — enchufe OFF + un mensaje:
-```
-✅ Amenaza eliminada: objetivo salió de zona búsqueda
-🚨 Alarma desactivada.
-📌 Modo actual: AUTO, zona=N3x3 C05, objetivo=white car
-```
+## 📄 Licencia
 
-## Licencia
-
-MIT — use, modifique, despliegue.
+MIT
 
 ---
 
@@ -155,6 +191,6 @@ MIT — use, modifique, despliegue.
 
 ![SuperGuard Footer — cyberpunk × Van Gogh × Gaudí](assets/banner-footer.png)
 
-**Protege tu infraestructura. 24/7. Local. Inteligente.**
+**Protect your infrastructure. 24/7. Local. Intelligent.**
 
 </div>

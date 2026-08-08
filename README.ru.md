@@ -2,148 +2,184 @@
 
 ![SuperGuard Banner — cyberpunk × Van Gogh × Gaudí](assets/banner-header.png)
 
-# SuperGuard Alarm — Автономный ИИ-сервис охраны
+# 🛡️ SuperGuard Alarm
 
-**[English](README.md) | [Русский](README.ru.md) | [Español](README.es.md)**
+ИИ-видеонаблюдение с реакцией через умные розетки и управлением из Telegram.
 
-**ИИ-видеонаблюдение → Детекция цели (YOLO11n + HSV-цвет + зоны) → Розетка Tuya ON → Telegram**
+**YOLO-детекция → HSV-цветовой фильтр → фильтр зоны → розетка Tuya ON → тревога в Telegram**
 
-Автономная служба охраны для Windows. Развёртывается одной командой на чистую машину.
+[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Руководство администратора](ADMIN_GUIDE.md)
 
-## Возможности
+</div>
 
-- 🎥 **RTSP/HLS камера** — Любая потоковая камера (тест: Banjar ATCS Indonesia)
-- 🤖 **YOLO11n детекция** — Машины, автобусы, грузовики, люди (GPU: Radeon 780M / ROCm / DirectML)
-- 🎨 **Цветовой фильтр HSV** — Цель задаётся свободным текстом: `/target красная машина`, `/target white truck`, `/target persona de pie`
-- 📍 **Зонный фильтр** — Сетка N×M, ячейки C01..C12: `/zone N3x4 C9`, `/zone off` (весь кадр)
-- 🔌 **Tuya Smart Plug (локально, tinytuya 3.4)** — Розетка включается при срабатывании
-- 📱 **Telegram-бот (отдельный токен)** — Меню команд, фото срабатывания, live-кадр 2с, авто-выкл по 5 чистым кадрам
-- 🌍 **Мультиязык** — RU/EN/ES через `/setlocal` (inline-кнопки), меню следует за выбранным языком
-- 💾 **Персистентность** — Настройки в `sguard_settings.json` переживают рестарты
-- 🛡 **Самозащита от зомби** — При старте убивает старые python.exe panic_mode на этом токене
-- 🪟 **Windows Service (NSSM)** — Автозапуск, логи, рестарт при падении
+---
 
-## Команды бота (меню справа от скрепки)
+## ✨ Возможности
 
-| Команда | Описание |
-|---------|----------|
-| `/autoguard` | Вкл/выкл авторежим (розетка OFF сама при уходе цели) |
-| `/togglealarm` | Ручная тревога (розетка ON, фото сразу, без YOLO) |
-| `/zone` | Зона: `N3x4 C9`, `N9 C5`, `off`, `?` |
-| `/target` | Цель: `красная машина`, `white truck`, `persona de pie`, `?` |
-| `/setlocal` | Язык интерфейса (RU/EN/ES) |
+- **8+ камер** — HLS-потоки, RTSP (локальные PoE-камеры), HTTP JPG-снимки — мониторинг всех одновременно
+- **ИИ-детекция** — YOLO11n (Ultralytics) с трекингом; фильтр по классу (авто, человек, автобус, грузовик…) и цвету (красный, жёлтый, синий… через HSV)
+- **Фильтр зоны** — поиск только в ячейке сетки: `N3x4 C9` = сетка 3×4, ячейка 9
+- **Активная камера** — команды (`/zone`, `/target`, `/plug`) всегда работают с активной камерой. Камера становится активной при тревоге или через `/cam` и остаётся активной, пока другая не станет активной
+- **Умные розетки** — Tuya, локальное управление (tinytuya); к камере можно привязать любое число розеток: `/plug 1 2 3`
+- **Протокол тревоги** — кадр срабатывания (аудит, не удаляется) + живой кадр, **обновляемый каждые 2 с** с камеры тревоги до снятия
+- **Автоснятие** — в авторежиме тревога снимается сама, когда цель покидает зону; в ручном режиме ждёт `/togglealarm`
+- **Ручной триггер** — `/togglealarm` для тестирования администратором; дублирует автоматическую тревогу (учитывает авто/ручной режим)
+- **Telegram-бот** — полное управление командами, инлайн-кнопки, 3 языка (EN/ES/RU)
+- **Отказоустойчивость** — авто-переподключение камер и розеток (`/plug test`), убийца зомби-процессов, атомарное хранение настроек, автообнаружение IP розеток через Tuya Cloud
+- **Просмотр в браузере** — встроенный MJPEG-сервер (`http://localhost:8081`)
+- **26 автоматических проверок** — синтаксис, конфиг, модели, камеры, актуаторы, протокол тревоги, обновление live-кадра
 
-## Быстрая установка (на чистом Windows 10/11)
+---
 
-```powershell
-# От администратора
-irm https://raw.githubusercontent.com/DarkPushkin/superguard-alarm/main/install_superguard.ps1 | iex
+## 🏗️ Архитектура
+
+```
+C:\SuperGuard\
+├── sguard.env                    # Вся конфигурация (токен, камеры, розетки)
+├── sguard_settings.json          # Настройки (зона/цель/розетки по камерам)
+├── saved_frames\                 # Архив кадров тревог
+├── mjpeg_stream_server.py        # Просмотр в браузере (порт 8081)
+├── requirements.txt
+└── superguard\
+    ├── main.py                   # Точка входа, SuperGuardApplication
+    ├── config.py                 # Загрузка и валидация конфигурации
+    ├── models\                   # Zone, Target, CameraSettings, Alarm (машина состояний)
+    ├── detectors\                # Пайплайн: YOLO + HSV-цвет + зона
+    ├── cameras\                  # Камеры JPG/HLS/RTSP, CameraManager
+    ├── actuators\                # Абстракция розеток (Tuya…), реестр, ActuatorManager
+    ├── telegram\                 # Telegram-клиент, роутер команд, бот
+    ├── storage\                  # Атомарное JSON-хранилище, EnvWriter
+    ├── tuya_cloud\               # Tuya Cloud синхронизация (авто-IP розеток)
+    └── tests\                    # test_all.py, test_live_update.py, test_plug_active_cam.py
 ```
 
-Или скачайте и запустите `install_superguard.ps1` с параметрами:
-```powershell
-.\install_superguard.ps1 -BotToken "123:ABC" -ChatId "143293811" -PlugIp "192.168.137.109" -PlugKey "abcdef123456..."
+### Пайплайн детекции
+
+```
+Камера (JPG/HLS/RTSP) → кадр → YOLO11n → фильтр зоны → фильтр класса → HSV-цвет
+   ↓ цель найдена N кадров подряд (require_frames)
+ТРЕВОГА: розетка(и) ON → Telegram: кадр срабатывания (msg A)
+   → через 1 с: живой кадр (msg B), обновляется каждые update_every с
+   ↓ цель ушла (auto_resolve_frames чистых кадров + авторежим)
+розетка(и) OFF → уведомление «Угроза устранена»
 ```
 
-## Ручная установка
+### Машина состояний тревоги
 
-```powershell
-# 1. Python 3.12
-winget install Python.Python.3.12
-
-# 2. Клонирование
-git clone https://github.com/DarkPushkin/superguard-alarm
-cd superguard-alarm
-
-# 3. Виртуальное окружение
-python -m venv venv
-venv\Scripts\pip install -r requirements.txt
-
-# 4. Конфиг
-copy sguard.env.example sguard.env
-# Отредактируйте sguard.env (токен, chat_id, IP розетки, local_key)
-
-# 5. Запуск
-venv\Scripts\python panic_mode.py
+```
+INACTIVE ──(цель N кадров)──▶ ACTIVE ──(авторежим + N чистых)──▶ AUTO_RESOLVING
+   ▲                                │                                 │
+   │                                │◀──(цель снова)───────────────────┘
+   └────(/togglealarm или кнопка)───┘
 ```
 
-## Windows-сервис (автозапуск)
+---
 
-```powershell
-# Установите NSSM
-# Создайте сервис:
-nssm install SuperGuardAlarm "C:\SuperGuard\venv\Scripts\python.exe" "C:\SuperGuard\panic_mode.py"
-nssm set SuperGuardAlarm AppDirectory "C:\SuperGuard"
-nssm set SuperGuardAlarm Start SERVICE_AUTO_START
-Start-Service SuperGuardAlarm
-```
-
-## Требования
-
-- Windows 10/11 (x64)
-- Python 3.12
-- GPU с поддержкой OpenCV (Radeon 780M / CUDA / DirectML) — **CPU fallback НЕТ**
-- Telegram-бот (создайте через @BotFather, **отдельный токен!**)
-- Tuya Smart Plug (прошит локально, tinytuya 3.4, порт 6668)
-- RTSP/HLS камера
-
-## GPU на AMD Radeon 780M (Beelink SER9)
+## 🚀 Быстрый старт
 
 ```bash
-# Windows ROCm 7.2 — ЕДИНСТВЕННЫЙ рабочий путь
-# WSL2 не работает, DirectML — segfault
-pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
+git clone <repo-url> superguard
+cd superguard
+pip install -r requirements.txt
+
+# 1. Создайте бота у @BotFather, укажите токен в sguard.env
+# 2. Настройте камеры и розетки в sguard.env (см. Руководство администратора)
+python superguard\main.py
 ```
 
-## Файлы конфигурации
+---
 
-### `sguard.env` (НЕ КОММИТИТЬ!)
+## ⚙️ Конфигурация (`sguard.env`)
+
+| Переменная | Назначение |
+|---|---|
+| `SG_TELEGRAM_BOT_TOKEN` | Токен бота (**отдельный** бот, не gateway-бот!) |
+| `SG_CHAT_ID` | ID чата Telegram для тревог |
+| `SG_PLUG_KEY` | Локальный ключ Tuya (дефолтная розетка, обратная совместимость) |
+| `SG_CAM_URL` | URL камеры 1 (HLS) |
+| `SG_CAM2_URL` … `SG_CAM32_URL` | Камеры 2–32 (добавление/переопределение без правки кода) |
+| `SG_CAM{N}_NAME` | Отображаемое имя камеры N |
+| `SG_UPDATE_EVERY` | Интервал обновления кадров (с) — период обновления live-кадра |
+| `SG_DETECT_EVERY` | Интервал цикла детекции (с) |
+| `SG_MIN_CONF` | Порог уверенности YOLO |
+| `SG_YELLOW_MIN_FRACTION` | Мин. доля пикселей цвета в боксе |
+| `SG_MIN_YELLOW_VEHICLES` | Мин. число совпадений для «хита» |
+| `SG_REQUIRE_FRAMES` | Кадров подряд для срабатывания тревоги |
+| `SG_AUTO_RESOLVE_FRAMES` | Чистых кадров для автоснятия тревоги |
+| `SG_ACTUATORS` | JSON-массив розеток (`name`, `type`, `cameras`, `ip`, `device_id`, `local_key`, `version`, `port`) |
+| `TUYA_ACCESS_ID` / `TUYA_ACCESS_SECRET` | Ключи Tuya Cloud OpenAPI (автообнаружение IP розеток) |
+
+Тип камеры выбирается автоматически по URL: `.jpg/.jpeg/.png` → JPG-камера; `.m3u8`/`rtsp://` → потоковая камера.
+
+---
+
+## 🤖 Команды Telegram
+
+| Команда | Действие |
+|---|---|
+| `/autoguard` | Переключить авторежим вкл/выкл |
+| `/togglealarm` | Ручная тревога вкл/выкл (тестовый триггер администратора) |
+| `/zone` | `/zone N3x4 C9` — задать зону, `/zone off` — весь кадр, `/zone ?` — справка |
+| `/target` | `/target red car` — задать цель, `/target ?` — справка |
+| `/plug` | Показать розетки активной камеры |
+| `/plug 1 2 3` | Привязать розетки plug1..plug3 к **активной** камере |
+| `/plug test` | Тест розеток, авто-переподключение упавших |
+| `/setlocal` | Язык EN/ES/RU (инлайн-кнопки) |
+| `/cam` | Список/статус камер, переключение активной (`/cam 3`) |
+
+### Формат зоны
+- `N{rows}x{cols} C{cell}` — сетка rows×cols, номер ячейки (1 = верх-лево)
+  `/zone N3x4 C9` → сетка 3×4, ячейка 9
+- `N{total} C{cell}` — квадратная сетка: `/zone N9 C5` = 3×3, ячейка 5
+- `off` / `всё` / `0` / `todo` / `nada` — весь кадр
+
+### Формат цели
+`/target <текст>` — слова-классы + слова-цвета:
+- Классы: `person`, `car`, `bus`, `truck`, `bicycle`, `motorcycle`…
+- Цвета: `red`, `blue`, `yellow`, `green`, `black`, `white`…
+- Пример: `/target red car`
+
+---
+
+## 🔌 Привязка розеток
+
+- Розетки задаются в `SG_ACTUATORS` (тип `tuya`, протокол 3.4, порт 6668)
+- Привязка к камере: переключитесь на неё (`/cam N`), затем `/plug 1 2` (номера → `plug1`, `plug2`)
+- При тревоге с этой камеры включаются **все привязанные розетки**; при снятии — выключаются
+- Привязки хранятся в `sguard_settings.json` и восстанавливаются при старте
+- `"ip": "auto"` + ключи Tuya Cloud → IP розетки обнаруживается автоматически (каждые 5 мин)
+
+---
+
+## 🖥️ Просмотр в браузере
+
+```bash
+python mjpeg_stream_server.py
 ```
-SG_TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-SG_CHAT_ID=143293811
-SG_PLUG_IP=192.168.137.109
-SG_PLUG_KEY=abcdef1234567890abcdef1234567890
+- `http://localhost:8081/` — MJPEG-поток
+- `http://localhost:8081/snapshot.jpg` — одиночный кадр
+
+---
+
+## 🧪 Тесты
+
+```bash
+python superguard\tests\test_all.py           # 11 проверок: синтаксис, конфиг, модели, камеры, актуаторы, приложение
+python superguard\tests\test_live_update.py   # 7 проверок: протокол обновления live-кадра
+python superguard\tests\test_plug_active_cam.py  # 8 проверок: активная камера, /plug, привязки тревоги
 ```
 
-### `sguard_settings.json` (автогенерируется)
-```json
-{
-  "zone": [3, 3, 5],
-  "target": "white car",
-  "lang": "es",
-  "auto": true
-}
-```
+---
 
-## Архитектура
+## 🛠️ Руководство администратора
 
-```
-panic_mode.py (один файл, ~1000 строк)
-├── Telegram long-poll (async-safe, 8s timeout, изоляция апдейтов)
-├── YOLO11n + ByteTrack (persist, conf=0.45, imgsz=640)
-├── HSV цветовой фильтр (11 цветов, red=дуальный диапазон 0-10/170-180)
-├── Зонная сетка (N×M, оранжевая рамка на кадре)
-├── Tuya local (tinytuya 3.4, свежее соединение на команду)
-├── Машина состояний тревоги (AUTO/MANUAL, 5-кадровый авто-resolve)
-├── i18n (RU/EN/ES, 48 ключей, tr() везде)
-├── Самозащита от зомби (PowerShell, psutil PID)
-└── Персистентность (JSON, load_settings() ПЕРВЫМ в __main__)
-```
+Полная настройка — добавление камер, добавление розеток всех поддерживаемых типов — в [ADMIN_GUIDE.md](ADMIN_GUIDE.md).
 
-## Сообщения бота
+---
 
-**Тревога (msg A)** — кадр срабатывания, рамка, **БЕЗ кнопок**, остаётся навсегда (аудит)  
-**Live (msg B)** — живой кадр 2с, обновляется, **удаляется при отключении**  
-**Авто-resolve (5 чистых кадров)** — розетка OFF + одно сообщение:
-```
-✅ Угроза устранена: цель покинула зону поиска
-🚨 Сигнализация отключена.
-📌 Текущий режим: АВТО, зона=N3x3 C05, цель=white car
-```
+## 📄 Лицензия
 
-## Лицензия
-
-MIT — используйте, меняйте, деплойте.
+MIT
 
 ---
 
@@ -155,6 +191,6 @@ MIT — используйте, меняйте, деплойте.
 
 ![SuperGuard Footer — cyberpunk × Van Gogh × Gaudí](assets/banner-footer.png)
 
-**Защити свою инфраструктуру. 24/7. Локально. Интеллектуально.**
+**Protect your infrastructure. 24/7. Local. Intelligent.**
 
 </div>
