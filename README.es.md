@@ -8,7 +8,7 @@ Vigilancia por vídeo con IA y respuesta mediante enchufes inteligentes, control
 
 **Detección YOLO → filtro de color HSV → filtro de zona → enchufe Tuya ON → alarma en Telegram**
 
-[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Guía de administrador (RU)](ADMIN_GUIDE.md)
+[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Guía de administrador](ADMIN_GUIDE.es.md)
 
 </div>
 
@@ -173,7 +173,7 @@ python superguard\tests\test_plug_active_cam.py  # 8 comprobaciones: cámara act
 
 ## 🛠️ Guía de administrador
 
-Configuración completa — añadir cámaras, añadir enchufes de todos los tipos soportados — en [ADMIN_GUIDE.md](ADMIN_GUIDE.md) (ruso).
+Configuración completa — añadir cámaras, añadir enchufes de todos los tipos soportados — en [ADMIN_GUIDE.es.md](ADMIN_GUIDE.es.md) (también [EN](ADMIN_GUIDE.en.md), [RU](ADMIN_GUIDE.ru.md)).
 
 ---
 

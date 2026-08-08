@@ -8,7 +8,7 @@ AI-powered video surveillance with smart-plug response and Telegram control.
 
 **YOLO object detection → HSV color filter → zone filter → Tuya smart plug ON → Telegram alarm**
 
-[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Admin Guide (RU)](ADMIN_GUIDE.md)
+[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Admin Guide](ADMIN_GUIDE.en.md)
 
 </div>
 
@@ -175,7 +175,7 @@ python superguard\tests\test_plug_active_cam.py  # 8 checks: active camera, /plu
 
 ## 🛠️ Admin Guide
 
-Full setup — adding cameras, adding plugs of all supported types — see [ADMIN_GUIDE.md](ADMIN_GUIDE.md) (Russian).
+Full setup — adding cameras, adding plugs of all supported types — see [ADMIN_GUIDE.en.md](ADMIN_GUIDE.en.md) (also [RU](ADMIN_GUIDE.ru.md), [ES](ADMIN_GUIDE.es.md)).
 
 ---
 

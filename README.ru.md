@@ -8,7 +8,7 @@
 
 **YOLO-детекция → HSV-цветовой фильтр → фильтр зоны → розетка Tuya ON → тревога в Telegram**
 
-[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Руководство администратора](ADMIN_GUIDE.md)
+[English](README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Руководство администратора](ADMIN_GUIDE.ru.md)
 
 </div>
 
@@ -173,7 +173,7 @@ python superguard\tests\test_plug_active_cam.py  # 8 проверок: акти�
 
 ## 🛠️ Руководство администратора
 
-Полная настройка — добавление камер, добавление розеток всех поддерживаемых типов — в [ADMIN_GUIDE.md](ADMIN_GUIDE.md).
+Полная настройка — добавление камер, добавление розеток всех поддерживаемых типов — в [ADMIN_GUIDE.ru.md](ADMIN_GUIDE.ru.md) (также [EN](ADMIN_GUIDE.en.md), [ES](ADMIN_GUIDE.es.md)).
 
 ---
 
