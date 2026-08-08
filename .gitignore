@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+*.egg-info/
 
 # Runtime state
 desktop_state/
@@ -25,3 +26,7 @@ desktop.ini
 
 # Local config with secrets - keep the example only
 sguard.env
+
+# Test files
+run_test.py
+kill_zombies.ps1
