@@ -1,2 +1,0 @@
-bg test started 05:35:26
-bg test alive at 05:36:56

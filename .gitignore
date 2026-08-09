@@ -33,3 +33,11 @@ kill_zombies.ps1
 
 # Evolution cron runtime state
 evolution_state.json
+bg_test.txt
+bot_probe.py
+sig_probe.py
+probe_bg.log
+bot.log
+bot_probe.log
+watchdog.log
+direct_test.log
