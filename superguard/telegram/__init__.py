@@ -47,14 +47,20 @@ class TelegramClient:
     def call(self, method: str, max_retries: int = 3, **kwargs) -> Optional[Dict]:
         """Call Telegram API method with retry logic."""
         self._rate_limit()
-        
+
+        # getUpdates long-poll: requests timeout must EXCEED the poll timeout,
+        # otherwise every poll is torn down at 20s < 25s and updates are delayed.
+        req_timeout = kwargs.get("timeout", 20)
+        if method == "getUpdates":
+            req_timeout = (req_timeout or 25) + 15  # 40s for a 25s long-poll
+
         for attempt in range(max_retries):
             try:
                 if "files" in kwargs:
                     files = kwargs.pop("files")
-                    r = self.session.post(f"{self.api_url}/{method}", files=files, data=kwargs, timeout=20)
+                    r = self.session.post(f"{self.api_url}/{method}", files=files, data=kwargs, timeout=req_timeout)
                 else:
-                    r = self.session.post(f"{self.api_url}/{method}", json=kwargs, timeout=20)
+                    r = self.session.post(f"{self.api_url}/{method}", json=kwargs, timeout=req_timeout)
                 
                 self._last_call = time.time()
                 
