@@ -83,7 +83,7 @@ class FakeCamera:
         self.cam_id = cam_id
         self.frame_counter = 0
         self.alive = True
-    
+   
     @property
     def latest(self):
         """Возвращает кадр с растущим счётчиком в углу - кадры РАЗНЫЕ."""
@@ -93,6 +93,13 @@ class FakeCamera:
         cv2.putText(frame, f"cam{self.cam_id} frame#{self.frame_counter:04d}",
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
         return frame
+    
+    @property
+    def latest_with_meta(self):
+        """Возвращает FrameData с hash для проверки уникальности."""
+        from superguard.cameras import FrameData
+        frame = self.latest
+        return FrameData(image=frame, timestamp=time.time(), camera_id=self.cam_id)
 
 class FakeCameraManager:
     def __init__(self):
@@ -143,6 +150,9 @@ class FakeActuatorManager:
 
 def setup_bot():
     config = load_config(BASE + r"\superguard")
+    # Override update_every for faster tests
+    config.detection.update_every = 0.5
+    config.detection.detect_every = 0.5
     bot = SuperGuardBot.__new__(SuperGuardBot)  # без __init__ (не создаём реальные компоненты)
     bot.config = config
     bot.tg = MockTelegram()

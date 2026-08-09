@@ -174,13 +174,15 @@ def make_bot():
 def test_alarm_sets_active_camera():
     """Тревога на камере 5 делает её активной."""
     bot = make_bot()
-    assert bot.active_camera_id == 1
+    assert bot.active_camera_id == 1, f"init active_camera_id={bot.active_camera_id}"
     frame = bot.camera_manager.cameras[5].latest
     bot.trigger_alarm("TEST", frame, cam_id=5)
-    assert bot.alarm.alarm_camera_id == 5
+    # Debug: check all three
+    print(f"  alarm_camera_id={bot.alarm.alarm_camera_id}, active_camera_id={bot.active_camera_id}, cam_mgr={bot.camera_manager.active_id}")
+    assert bot.alarm.alarm_camera_id == 5, f"alarm_camera_id={bot.alarm.alarm_camera_id}"
     assert bot.active_camera_id == 5, f"active={bot.active_camera_id}, ожидал 5"
-    assert bot.camera_manager.active_id == 5
-    bot.alarm.deactivate()
+    assert bot.camera_manager.active_id == 5, f"cam_mgr={bot.camera_manager.active_id}"
+    bot.alarm.deactivate(cam_id=5)
 
 def test_active_camera_stays_after_alarm():
     """После снятия тревоги активная камера НЕ сбрасывается."""

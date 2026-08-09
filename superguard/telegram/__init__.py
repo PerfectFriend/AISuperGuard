@@ -750,10 +750,11 @@ class SuperGuardBot:
 
         # The triggering camera BECOMES the active camera and stays active
         # until another camera becomes active (via alarm or /cam command).
-        if self.alarm.active_camera_id != cam_id:
-            self.alarm.active_camera_id = cam_id
-            self.camera_manager.set_active(cam_id)
-            self.load_camera_settings()
+        # Always sync camera_manager.active_id with the triggering camera.
+        self.alarm.active_camera_id = cam_id
+        self.active_camera_id = cam_id
+        self.camera_manager.set_active(cam_id)
+        self.load_camera_settings()
 
         # Turn on actuators for the triggering camera
         self.set_actuators(True, cam_id)
@@ -796,8 +797,12 @@ class SuperGuardBot:
 
     def _update_loop(self, cam_id: int):
         """Per-camera: update the alarm message every update_every s with the
-        latest frame from the temp pool while THIS camera's alarm is active."""
+        LATEST NEW frame from the camera while THIS camera's alarm is active.
+        
+        Only updates if frame timestamp/hash changed since last update.
+        Frame pool stores recent frames for potential manual review."""
         state = self.alarm.get(cam_id)
+        last_sent_hash = None
         while True:
             time.sleep(self.config.detection.update_every)
             if not state.is_active:
@@ -811,11 +816,19 @@ class SuperGuardBot:
             if not cam:
                 continue
 
-            frame = cam.latest
-            if frame is None:
+            # Get frame with metadata to check if it's actually NEW
+            frame_meta = cam.latest_with_meta
+            if frame_meta is None or frame_meta.image is None:
                 continue
 
-            # Push into temp pool (bounded), update message with newest frame
+            frame = frame_meta.image
+            frame_hash = frame_meta.hash
+
+            # Skip if same frame as last sent (camera hasn't produced new frame)
+            if last_sent_hash is not None and frame_hash == last_sent_hash:
+                continue
+
+            # This is a NEW frame - push to pool and send
             state.frame_pool.append(frame)
             if len(state.frame_pool) > 60:
                 state.frame_pool.pop(0)
@@ -830,6 +843,7 @@ class SuperGuardBot:
                     self.save_local(buf.tobytes())
                     # Desktop bridge: keep alarm frame fresh
                     self.write_alarm_frame(frame)
+                    last_sent_hash = frame_hash
             except Exception as e:
                 print(f"  Live frame update error: {e}")
     

@@ -447,6 +447,8 @@ class CameraAlarmState:
             self.known_msg_ids.clear()
             self.msg_id = None
             self.clean_frames = 0
+            # Clear frame pool (cache cleanup on alarm end)
+            self.frame_pool = []
             was_auto = self.auto_mode
             had_manual = self.prev_auto_mode is not None
             restored_auto = self.prev_auto_mode
