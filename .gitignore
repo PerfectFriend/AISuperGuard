@@ -30,3 +30,6 @@ sguard.env
 # Test files
 run_test.py
 kill_zombies.ps1
+
+# Evolution cron runtime state
+evolution_state.json

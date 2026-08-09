@@ -132,18 +132,14 @@ class SuperGuardApplication:
 def kill_other_instances():
     """Kill other python.exe processes running panic_mode or main.py."""
     import subprocess
+    import os
+    mypid = os.getpid()
+    # Use taskkill /F /FI instead of PowerShell for reliability
     try:
-        import psutil
-        mypid = psutil.Process().pid
-        ps_script = f"""$mypid = {mypid}
-Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-Where-Object {{ $_.CommandLine -match '(panic_mode|main\\.py|superguard)' -and $_.ProcessId -ne $mypid }} |
-ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force; Write-Output ('killed ' + $_.ProcessId) }}
-"""
-        with open("kill_zombies.ps1", "w", encoding="utf-8") as f:
-            f.write(ps_script)
-        r = subprocess.run(["powershell", "-NoProfile", "-File", "kill_zombies.ps1"],
-                          capture_output=True, text=True, timeout=20, encoding="utf-8", errors="ignore")
+        r = subprocess.run(
+            ["taskkill", "/F", "/FI", "IMAGENAME eq python.exe", "/FI", f"PID ne {mypid}"],
+            capture_output=True, text=True, timeout=20, encoding="utf-8", errors="ignore"
+        )
         if r.stdout.strip():
             print(f"  Killed stale instances: {r.stdout.strip()}")
     except Exception as e:
