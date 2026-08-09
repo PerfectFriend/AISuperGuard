@@ -21,13 +21,17 @@ class TelegramConfig:
 class TuyaPlugConfig:
     """Single Tuya plug configuration."""
     name: str
-    ip: str
-    device_id: str
-    local_key: str
+    ip: str = ""
+    device_id: str = ""
+    local_key: str = ""
     version: float = 3.4
     port: int = 6668
     cameras: List[int] = field(default_factory=list)
     type: str = "tuya"
+    # Cloud API fields (for tuya_cloud type)
+    access_id: str = ""
+    access_secret: str = ""
+    region: str = "eu"
 
 
 @dataclass
@@ -115,6 +119,10 @@ def parse_actuator_configs(raw: str, defaults: Dict[str, Any]) -> List[TuyaPlugC
                 local_key=item.get("local_key", ""),
                 version=item.get("version", 3.4),
                 port=item.get("port", 6668),
+                # Cloud fields
+                access_id=item.get("access_id", ""),
+                access_secret=item.get("access_secret", ""),
+                region=item.get("region", "eu"),
             ))
         return plugs
     except Exception as e:

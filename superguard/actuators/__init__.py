@@ -120,6 +120,176 @@ actuator_registry = ActuatorRegistry()
 
 
 # ============================================================================
+# TUYA ACTUATOR (Cloud Control via Tuya Cloud API)
+# ============================================================================
+
+class TuyaCloudActuator(BaseActuator):
+    """Tuya Smart Plug actuator using Tuya Cloud API (works from anywhere, no local IP needed)."""
+    
+    # Standard Tuya Cloud DPS codes
+    DPS_RELAY = "1"      # Relay switch (bool)
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        
+        # Required config (from Tuya Cloud project)
+        self.device_id = config.get("device_id")
+        self.access_id = config.get("access_id")
+        self.access_secret = config.get("access_secret")
+        self.region = config.get("region", "eu")
+        
+        if not all([self.device_id, self.access_id, self.access_secret]):
+            raise ValueError("TuyaCloudActuator requires device_id, access_id, and access_secret in config")
+        
+        # Region endpoints
+        self.REGION_URLS = {
+            "cn": "https://openapi.tuyacn.com",
+            "us": "https://openapi.tuyaus.com",
+            "eu": "https://openapi.tuyaeu.com",
+            "in": "https://openapi.tuyain.com",
+        }
+        self.base_url = self.REGION_URLS.get(self.region, "https://openapi.tuyaeu.com")
+        
+        # Auth state
+        self._token: Optional[str] = None
+        self._token_expire: float = 0
+        self._lock = threading.Lock()
+        
+    def _get_sign(self, t: str) -> str:
+        """Generate HMAC-SHA256 signature."""
+        msg = f"{self.access_id}{t}".encode()
+        key = self.access_secret.encode()
+        return hmac.new(key, msg, hashlib.sha256).hexdigest().upper()
+    
+    def _get_token(self) -> bool:
+        """Obtain access token from Tuya Cloud."""
+        import time
+        t = str(int(time.time() * 1000))
+        sign = self._get_sign(t)
+        headers = {
+            "client_id": self.access_id,
+            "sign": sign,
+            "t": t,
+            "sign_method": "HMAC-SHA256",
+        }
+        try:
+            r = requests.post(f"{self.base_url}/v1.0/token?grant_type=1", 
+                            headers=headers, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("success"):
+                    self._token = data["result"]["access_token"]
+                    self._token_expire = time.time() + data["result"]["expire_time"] - 60
+                    return True
+        except Exception as e:
+            print(f"  [TuyaCloudActuator] Token error: {e}")
+        return False
+    
+    def _headers(self) -> Optional[Dict[str, str]]:
+        """Get authenticated headers, refreshing token if needed."""
+        import time
+        with self._lock:
+            if not self._token or time.time() >= self._token_expire:
+                if not self._get_token():
+                    return None
+            t = str(int(time.time() * 1000))
+            sign = self._get_sign(t)
+            return {
+                "client_id": self.access_id,
+                "access_token": self._token,
+                "sign": sign,
+                "t": t,
+                "sign_method": "HMAC-SHA256",
+            }
+    
+    def _send_command(self, commands: List[Dict]) -> bool:
+        """Send command to device via Tuya Cloud API."""
+        headers = self._headers()
+        if not headers:
+            return False
+        
+        payload = {"commands": commands}
+        try:
+            r = requests.post(
+                f"{self.base_url}/v1.0/devices/{self.device_id}/commands",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return data.get("success", False)
+        except Exception as e:
+            print(f"  [TuyaCloudActuator] Command error: {e}")
+        return False
+    
+    def turn_on(self) -> bool:
+        """Turn the plug ON via Cloud API."""
+        result = self._send_command([{"code": self.DPS_RELAY, "value": True}])
+        if result:
+            self._last_status = True
+        return result
+    
+    def turn_off(self) -> bool:
+        """Turn the plug OFF via Cloud API."""
+        result = self._send_command([{"code": self.DPS_RELAY, "value": False}])
+        if result:
+            self._last_status = False
+        return result
+    
+    def get_status(self) -> bool:
+        """Get current relay status via Cloud API."""
+        headers = self._headers()
+        if not headers:
+            return self._last_status if self._last_status is not None else False
+        
+        try:
+            r = requests.get(
+                f"{self.base_url}/v1.0/devices/{self.device_id}/status",
+                headers=headers,
+                timeout=10
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("success"):
+                    for item in data["result"]:
+                        if item.get("code") == self.DPS_RELAY:
+                            status = bool(item.get("value", False))
+                            self._last_status = status
+                            return status
+        except Exception as e:
+            print(f"  [TuyaCloudActuator] Status error: {e}")
+        return self._last_status if self._last_status is not None else False
+    
+    def get_power(self) -> Optional[float]:
+        """Get current power consumption in watts via Cloud API."""
+        headers = self._headers()
+        if not headers:
+            return None
+        
+        try:
+            r = requests.get(
+                f"{self.base_url}/v1.0/devices/{self.device_id}/status",
+                headers=headers,
+                timeout=10
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("success"):
+                    for item in data["result"]:
+                        if item.get("code") == "cur_power":  # Power in 0.1W
+                            return float(item.get("value", 0)) / 10.0
+        except Exception as e:
+            print(f"  [TuyaCloudActuator] Power error: {e}")
+        return None
+
+
+# Auto-register
+actuator_registry.register("tuya_cloud", TuyaCloudActuator)
+actuator_registry.register("tuya-cloud", TuyaCloudActuator)
+
+
+# ============================================================================
 # TUYA ACTUATOR (Local Control via tinytuya)
 # ============================================================================
 
@@ -315,6 +485,10 @@ class ActuatorManager:
                 "local_key": plug_config.local_key,
                 "version": plug_config.version,
                 "port": plug_config.port,
+                # Cloud API fields (for tuya_cloud type)
+                "access_id": plug_config.access_id,
+                "access_secret": plug_config.access_secret,
+                "region": plug_config.region,
             }
             
             try:
