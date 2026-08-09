@@ -383,3 +383,197 @@ class Alarm:
     @property
     def is_auto_resolving(self) -> bool:
         return self.state == AlarmState.AUTO_RESOLVING
+
+# ============================================================================
+# PER-CAMERA ALARM MANAGER (concurrent alarms protocol)
+# ============================================================================
+
+@dataclass
+class CameraAlarmState:
+    """Per-camera alarm state machine (each camera alarms independently).
+
+    Single alarm message per camera:
+      first frame (trigger) -> live frames from frame_pool every update_every s
+      -> on cancel: first frame is restored into the same message, pool cleared.
+
+    Manual trigger: auto_mode is forced False for this camera and the previous
+    global auto_mode is stored in prev_auto_mode; manual cancel restores it.
+    """
+
+    state: AlarmState = AlarmState.INACTIVE
+    cam_id: int = 0
+    auto_mode: bool = False                 # mode of THIS alarm (manual overrides)
+    prev_auto_mode: Optional[bool] = None   # global auto_mode saved on manual trigger
+    msg_id: Optional[int] = None            # single alarm message (first + live frames)
+    known_msg_ids: Set[int] = field(default_factory=set)
+    clean_frames: int = 0
+    frame_pool: List = field(default_factory=list)  # temp pool of live frames
+    first_frame: Any = None                 # first (trigger) frame, restored on cancel
+    last_update_ts: float = 0.0
+
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    @property
+    def is_active(self) -> bool:
+        return self.state in (AlarmState.ACTIVE, AlarmState.AUTO_RESOLVING)
+
+    def activate(self, auto: bool = False, manual: bool = False) -> bool:
+        """Activate alarm for this camera. Returns True if newly activated."""
+        with self._lock:
+            if self.state == AlarmState.ACTIVE:
+                return False
+            self.state = AlarmState.ACTIVE
+            self.clean_frames = 0
+            self.frame_pool = []
+            self.first_frame = None
+            if manual:
+                # Manual trigger forces manual mode for this alarm;
+                # remember the global auto_mode so manual cancel can restore it.
+                self.prev_auto_mode = auto
+                self.auto_mode = False
+            else:
+                self.prev_auto_mode = None
+                self.auto_mode = auto
+            return True
+
+    def deactivate(self, keep_trigger: bool = True) -> Dict:
+        """Deactivate alarm for this camera. Returns cleanup info."""
+        with self._lock:
+            if self.state == AlarmState.INACTIVE:
+                return {"already_inactive": True}
+            self.state = AlarmState.INACTIVE
+            keep_id = self.msg_id if keep_trigger else None
+            to_delete = [mid for mid in self.known_msg_ids if mid != keep_id]
+            self.known_msg_ids.clear()
+            self.msg_id = None
+            self.clean_frames = 0
+            was_auto = self.auto_mode
+            had_manual = self.prev_auto_mode is not None
+            restored_auto = self.prev_auto_mode
+            self.prev_auto_mode = None
+            return {
+                "keep_msg_id": keep_id,
+                "delete_msg_ids": to_delete,
+                "was_auto": was_auto,
+                "had_manual": had_manual,
+                "restored_auto": restored_auto,
+            }
+
+    def start_auto_resolve(self) -> bool:
+        with self._lock:
+            if self.state != AlarmState.ACTIVE or not self.auto_mode:
+                return False
+            self.state = AlarmState.AUTO_RESOLVING
+            self.clean_frames = 0
+            return True
+
+    def increment_clean(self) -> int:
+        with self._lock:
+            if self.state == AlarmState.AUTO_RESOLVING:
+                self.clean_frames += 1
+                return self.clean_frames
+            return 0
+
+    def reset_clean(self) -> int:
+        with self._lock:
+            if self.state == AlarmState.AUTO_RESOLVING:
+                self.state = AlarmState.ACTIVE
+            self.clean_frames = 0
+            return 0
+
+
+class AlarmManager:
+    """Per-camera concurrent alarms.
+
+    Every camera runs its own CameraAlarmState; alarms from different cameras
+    are handled simultaneously (no global queue). The 'active camera' (used by
+    /cam, /zone, /plug commands) is the last camera that triggered an alarm and
+    stays active until another camera takes over (auto or manual trigger).
+    """
+
+    def __init__(self):
+        self._states: Dict[int, CameraAlarmState] = {}
+        self.auto_mode: bool = False          # global default mode for new alarms
+        self.active_camera_id: int = 1        # camera for commands (last alarm source)
+        self.control_msg_id: Optional[int] = None
+        self._last_alarm_cam: Optional[int] = None
+
+    def get(self, cam_id: int) -> CameraAlarmState:
+        """Get (lazily create) per-camera state."""
+        if cam_id not in self._states:
+            self._states[cam_id] = CameraAlarmState(cam_id=cam_id)
+        return self._states[cam_id]
+
+    def active_cameras(self) -> List[int]:
+        """Cameras with an active alarm, in ascending order."""
+        return sorted(c for c, s in self._states.items() if s.is_active)
+
+    def any_active(self) -> bool:
+        return any(s.is_active for s in self._states.values())
+
+    def is_cam_active(self, cam_id: int) -> bool:
+        s = self._states.get(cam_id)
+        return bool(s and s.is_active)
+
+    def activate(self, cam_id: int, auto: bool = False, manual: bool = False) -> bool:
+        """Activate alarm for a specific camera (concurrent with others)."""
+        state = self.get(cam_id)
+        if not state.activate(auto=auto, manual=manual):
+            return False
+        self._last_alarm_cam = cam_id
+        self.active_camera_id = cam_id
+        return True
+
+    def deactivate(self, cam_id: int, keep_trigger: bool = True) -> Dict:
+        """Deactivate alarm for a specific camera. Returns cleanup info."""
+        state = self._states.get(cam_id)
+        if not state:
+            return {"already_inactive": True}
+        result = state.deactivate(keep_trigger=keep_trigger)
+        if not result.get("already_inactive") and result.get("had_manual"):
+            # Manual cancel restores the global auto mode saved at manual trigger.
+            if result.get("restored_auto") is not None:
+                self.auto_mode = result["restored_auto"]
+        return result
+
+    # ---- compatibility helpers (status.json, control message) ----
+    @property
+    def alarm_camera_id(self) -> Optional[int]:
+        return self._last_alarm_cam
+
+    @alarm_camera_id.setter
+    def alarm_camera_id(self, cam_id: int):
+        self._last_alarm_cam = cam_id
+
+    @property
+    def is_active(self) -> bool:
+        return self.any_active()
+
+    @property
+    def trigger_msg_id(self) -> Optional[int]:
+        cams = self.active_cameras()
+        if cams:
+            return self._states[cams[-1]].msg_id
+        return None
+
+    @property
+    def live_msg_id(self) -> Optional[int]:
+        return self.trigger_msg_id
+
+    @property
+    def known_msg_ids(self) -> Set[int]:
+        ids: Set[int] = set()
+        for s in self._states.values():
+            ids |= s.known_msg_ids
+        return ids
+
+    @property
+    def clean_frames(self) -> int:
+        cams = self.active_cameras()
+        if cams:
+            return self._states[cams[-1]].clean_frames
+        return 0
+
+    def reset(self):
+        self._states.clear()
+        self._last_alarm_cam = None

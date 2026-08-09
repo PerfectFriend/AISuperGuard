@@ -149,10 +149,11 @@ def setup_bot():
     bot.camera_manager = FakeCameraManager()
     bot.actuator_manager = FakeActuatorManager()
     bot.camera_settings = {}
-    bot.active_camera_id = 1
     bot.lang = "ru"
     bot._load_i18n()
-    bot.alarm = __import__("superguard.models", fromlist=["Alarm"]).Alarm()
+    models = __import__("superguard.models", fromlist=["AlarmManager"])
+    bot.alarm = models.AlarmManager()
+    bot.active_camera_id = 1
     bot.frame_dir = config.frame_dir
     return bot
 
@@ -163,63 +164,61 @@ def test_trigger_uses_source_camera():
     bot.trigger_alarm("TEST", frame, cam_id=2)
     assert bot.alarm.alarm_camera_id == 2, f"alarm_camera_id={bot.alarm.alarm_camera_id}, ожидал 2"
     assert bot.alarm.is_active
-    # live кадр должен браться с камеры 2
-    time.sleep(1.5)  # ждём _send_live_after_delay
-    assert bot.tg.send_photo_calls, "нет отправленных фото"
-    # Кадр 2 = live кадр (второй вызов send_photo), проверяем что счётчик камеры 2 рос
+    # Одно сообщение тревоги (новый протокол) + live-кадр из пула камеры 2
+    time.sleep(2.5)  # ждём цикл обновления (нужно 2+ секунд для первого edit)
     cam2_counter = bot.camera_manager.cameras[2].frame_counter
     assert cam2_counter >= 2, f"камера 2 дала мало кадров: {cam2_counter}"
-    bot.alarm.deactivate()
+    bot.cancel_alarm(cam_id=2)
 
 def test_live_frame_sent_once_then_updated():
-    """msg A (триггер) + msg B (live) отправляются, потом live ОБНОВЛЯЕТСЯ."""
+    """Одно сообщение тревоги (trigger), потом ОНО ЖЕ обновляется live-кадрами."""
     bot = setup_bot()
     frame = bot.camera_manager.cameras[2].latest
     bot.trigger_alarm("TEST", frame, cam_id=2)
-    
-    # Ждём первый live (1с) + несколько циклов обновления
+
+    # Новый протокол: ровно ОДИН send_photo (trigger), live идёт через edit
     time.sleep(1.5)
-    assert len(bot.tg.send_photo_calls) == 2, \
-        f"ожидал 2 send_photo (trigger+live), получил {len(bot.tg.send_photo_calls)}"
-    assert bot.alarm.live_msg_id is not None, "live_msg_id не установлен"
-    
+    assert len(bot.tg.send_photo_calls) == 1, \
+        f"ожидал 1 send_photo (trigger), получил {len(bot.tg.send_photo_calls)}"
+    assert bot.alarm.live_msg_id is not None, "msg_id не установлен"
+
     # Ждём цикл обновления (update_every=2с + запас)
     time.sleep(2.5)
     assert bot.tg.edit_count >= 1, \
         f"live кадр не обновился: edit_message_media вызван {bot.tg.edit_count} раз"
     print(f"    edit_message_media вызовов: {bot.tg.edit_count} (ожидали ≥1 за ~4с)")
-    
-    bot.alarm.deactivate()
+
+    bot.cancel_alarm(cam_id=2)
 
 def test_live_frames_are_different():
     """Каждый live-кадр реально НОВЫЙ (байты отличаются)."""
     bot = setup_bot()
     frame = bot.camera_manager.cameras[2].latest
     bot.trigger_alarm("TEST", frame, cam_id=2)
-    
-    time.sleep(1.5)  # первый live
-    live1 = bot.tg.send_photo_calls[1][0] if len(bot.tg.send_photo_calls) > 1 else None
-    assert live1 is not None, "нет первого live кадра"
-    
+
+    time.sleep(1.5)  # первый цикл обновления
+    live1 = bot.tg.send_photo_calls[0][0] if bot.tg.send_photo_calls else None
+    assert live1 is not None, "нет trigger кадра"
+
     time.sleep(2.5)  # ждём обновление
     assert bot.tg.edit_media_calls, "нет edit_message_media вызовов"
     live2 = bot.tg.edit_media_calls[-1][1]
-    
+
     assert live1 != live2, "live-кадры идентичны! Камера не отдаёт новые кадры"
     print(f"    live1={len(live1)}b vs live2={len(live2)}b - кадры разные ✓")
-    
-    bot.alarm.deactivate()
+
+    bot.cancel_alarm(cam_id=2)
 
 def test_update_loop_stops_on_cancel():
     """После снятия тревоги цикл обновления останавливается."""
     bot = setup_bot()
     frame = bot.camera_manager.cameras[2].latest
     bot.trigger_alarm("TEST", frame, cam_id=2)
-    
-    time.sleep(1.5)  # первый live + запуск цикла
-    bot.cancel_alarm()
+
+    time.sleep(1.5)  # запуск цикла
+    bot.cancel_alarm(cam_id=2)
     count_after_cancel = bot.tg.edit_count
-    
+
     time.sleep(3.0)  # 1+ циклов
     assert bot.tg.edit_count == count_after_cancel, \
         f"цикл не остановился: было {count_after_cancel}, стало {bot.tg.edit_count}"
@@ -233,17 +232,21 @@ def test_manual_alarm_uses_active_camera():
     frame = bot.camera_manager.cameras[2].latest
     bot.trigger_alarm("MANUAL", frame)  # без cam_id -> active_camera_id
     assert bot.alarm.alarm_camera_id == 2, f"ожидал 2, получил {bot.alarm.alarm_camera_id}"
-    bot.alarm.deactivate()
+    bot.cancel_alarm(cam_id=2)
 
 def test_manual_trigger_auto_mode_preserved():
-    """Ручной триггер в АВТОрежиме: auto_mode сохраняется - тревога снимется сама."""
+    """Ручной триггер в АВТОрежиме: тревога становится РУЧНОЙ, после отмены АВТО возвращается."""
     bot = setup_bot()
     bot.alarm.auto_mode = True
     bot.toggle_alarm()  # ручной триггер (тест администратора)
     assert bot.alarm.is_active, "тревога не активировалась"
-    assert bot.alarm.auto_mode, "авторежим потерялся при ручном триггере!"
-    # имитация: цель ушла -> авто-снятие должно сработать
-    bot.alarm.deactivate()
+    # Ручной триггер переключает ЭТУ тревогу в ручной режим (prev_auto сохранён)
+    state = bot.alarm.get(bot.alarm.alarm_camera_id)
+    assert state.auto_mode is False, "ручной триггер не переключил тревогу в ручной режим"
+    assert state.prev_auto_mode is True, "prev_auto_mode не сохранён"
+    # Ручная отмена возвращает АВТО-режим
+    bot.cancel_alarm(cam_id=bot.alarm.alarm_camera_id)
+    assert bot.alarm.auto_mode is True, "после ручной отмены авто-режим не восстановлен!"
 
 def test_manual_trigger_manual_mode_waits():
     """Ручной триггер в РУЧНОМ режиме: auto_mode=False, ждёт /togglealarm."""
@@ -251,11 +254,12 @@ def test_manual_trigger_manual_mode_waits():
     bot.alarm.auto_mode = False
     bot.toggle_alarm()
     assert bot.alarm.is_active, "тревога не активировалась"
-    assert not bot.alarm.auto_mode, "ручной режим стал авто!"
+    state = bot.alarm.get(bot.alarm.alarm_camera_id)
+    assert not state.auto_mode, "ручной режим стал авто!"
     # В ручном режиме тревога НЕ снимается автоматически
-    bot.alarm.clean_frames = 999  # хоть 999 чистых кадров - не снимется
+    state.clean_frames = 999  # хоть 999 чистых кадров - не снимется
     assert bot.alarm.is_active, "ручная тревога снялась автоматически - баг!"
-    bot.alarm.deactivate()
+    bot.cancel_alarm(cam_id=bot.alarm.alarm_camera_id)
 
 def test_desktop_bridge_writes_state():
     """При тревоге пишутся desktop_state/status.json и alarm_live.jpg."""
@@ -289,34 +293,36 @@ def test_desktop_bridge_writes_state():
         st2 = json.load(f)
     assert st2["alarm_active"] is False, st2
 
-print("=" * 60)
-print("SUPERGUARD LIVE-КАДР: ТЕСТ ПРОТОКОЛА БЕЗОПАСНОСТИ")
-print("=" * 60)
+if __name__ == "__main__":
+    print("=" * 60)
+    print("SUPERGUARD LIVE-КАДР: ТЕСТ ПРОТОКОЛА БЕЗОПАСНОСТИ")
+    print("=" * 60)
 
-print("\n[1] Привязка тревоги к камере-источнику")
-check("trigger_alarm(cam_id=2) -> alarm_camera_id=2", test_trigger_uses_source_camera)
+    print("\n[1] Привязка тревоги к камере-источнику")
+    check("trigger_alarm(cam_id=2) -> alarm_camera_id=2", test_trigger_uses_source_camera)
 
-print("\n[2] Отправка и обновление live кадра")
-check("msgA + msgB отправлены, live обновляется", test_live_frame_sent_once_then_updated)
+    print("\n[2] Отправка и обновление live кадра")
+    check("msgA + msgB отправлены, live обновляется", test_live_frame_sent_once_then_updated)
 
-print("\n[3] Новизна кадров")
-check("live-кадры реально разные", test_live_frames_are_different)
+    print("\n[3] Новизна кадров")
+    check("live-кадры реально разные", test_live_frames_are_different)
 
-print("\n[4] Остановка цикла при снятии тревоги")
-check("цикл останавливается после cancel_alarm", test_update_loop_stops_on_cancel)
+    print("\n[4] Остановка цикла при снятии тревоги")
+    check("цикл останавливается после cancel_alarm", test_update_loop_stops_on_cancel)
 
-print("\n[5] Ручная тревога")
-check("ручная тревога -> активная камера", test_manual_alarm_uses_active_camera)
-check("ручной триггер сохраняет АВТОрежим (авто-снятие)", test_manual_trigger_auto_mode_preserved)
-check("ручной триггер в РУЧНОМ режиме ждёт отключения", test_manual_trigger_manual_mode_waits)
+    print("\n[5] Ручная тревога")
+    check("ручная тревога -> активная камера", test_manual_alarm_uses_active_camera)
+    check("ручной триггер сохраняет АВТОрежим (авто-снятие)", test_manual_trigger_auto_mode_preserved)
+    check("ручной триггер в РУЧНОМ режиме ждёт отключения", test_manual_trigger_manual_mode_waits)
 
-print("\n[6] Desktop bridge")
-check("status.json + alarm_live.jpg при тревоге", test_desktop_bridge_writes_state)
+    print("\n[6] Desktop bridge")
+    check("status.json + alarm_live.jpg при тревоге", test_desktop_bridge_writes_state)
 
-print("\n" + "=" * 60)
-print(f"ИТОГ: {PASS} PASS, {FAIL} FAIL")
-if FAILURES:
-    for name, e in FAILURES:
-        print(f"  ✗ {name}: {e}")
-print("=" * 60)
-sys.exit(1 if FAIL else 0)
+    print("=" * 60)
+    print(f"ИТОГ: {PASS} PASS, {FAIL} FAIL")
+    if FAILURES:
+        for name, e in FAILURES:
+            print(f"  ✗ {name}: {e}")
+    print("=" * 60)
+    sys.exit(1 if FAIL else 0)
+    sys.exit(1 if FAIL else 0)

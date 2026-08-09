@@ -20,7 +20,7 @@ sys.path.insert(0, BASE)
 
 from superguard.config import load_config
 from superguard.telegram import SuperGuardBot
-from superguard.models import CameraSettings, Alarm
+from superguard.models import CameraSettings, Alarm, AlarmManager
 
 PASS = 0
 FAIL = 0
@@ -162,10 +162,10 @@ def make_bot():
     bot.camera_manager = FakeCameraManager()
     bot.actuator_manager = FakeActuatorManager()
     bot.camera_settings = {}
-    bot.active_camera_id = 1
     bot.lang = "ru"
     bot._load_i18n()
-    bot.alarm = Alarm()
+    bot.alarm = AlarmManager()
+    bot.active_camera_id = 1
     bot.frame_dir = config.frame_dir
     return bot
 

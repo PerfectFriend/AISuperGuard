@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from functools import wraps
 
 from ..config import SuperGuardConfig, TelegramConfig, CameraConfig
-from ..models import Alarm, CameraSettings, Zone, Target, parse_zone_spec, parse_target_text
+from ..models import Alarm, AlarmManager, CameraAlarmState, CameraSettings, Zone, Target, parse_zone_spec, parse_target_text
 from ..cameras import CameraManager
 from ..actuators import ActuatorManager
 from ..detectors import create_pipeline_from_config
@@ -205,13 +205,21 @@ class SuperGuardBot:
         
         # Core components
         self.tg = TelegramClient(config.telegram)
-        self.alarm = Alarm()
+        self.alarm = AlarmManager()  # per-camera concurrent alarms
         self.camera_manager = CameraManager(config)
         self.actuator_manager = ActuatorManager(config)
         
         # Per-camera settings (loaded from disk)
         self.camera_settings: Dict[int, CameraSettings] = {}
-        self.active_camera_id = 1
+    
+    @property
+    def active_camera_id(self) -> int:
+        """Active camera (command target). Delegates to AlarmManager."""
+        return self.alarm.active_camera_id
+
+    @active_camera_id.setter
+    def active_camera_id(self, value: int):
+        self.alarm.active_camera_id = value
         
         # Localization
         self.lang = "ru"
@@ -222,7 +230,7 @@ class SuperGuardBot:
         self._register_commands()
         
         # Frame directory
-        self.frame_dir = config.frame_dir
+        self.frame_dir = self.config.frame_dir
         import os
         os.makedirs(self.frame_dir, exist_ok=True)
     
@@ -585,8 +593,10 @@ class SuperGuardBot:
                                 self.tr("auto_on_detail", n=self.config.detection.auto_resolve_frames))
     
     def toggle_alarm(self):
-        if self.alarm.is_active:
-            self.cancel_alarm(note=self.tr("alarm_off_manual"))
+        cams = self.alarm.active_cameras()
+        if cams:
+            # Manual cancel: cancel the last active camera alarm (restores auto mode)
+            self.cancel_alarm(cam_id=cams[-1], note=self.tr("alarm_off_manual"))
         else:
             cam = self.camera_manager.get_active()
             if not cam or not cam.alive:
@@ -596,36 +606,58 @@ class SuperGuardBot:
             if frame is None:
                 self.tg.send_message(self.config.telegram.chat_id, self.tr("cam_unavailable"))
                 return
-            # Manual trigger duplicates the automatic alarm behavior:
-            self.trigger_alarm(self.tr("force_alarm"), frame)
-            if self.alarm.auto_mode:
-                # Auto mode: alarm will cancel itself when the target leaves the zone
-                self.tg.send_message(self.config.telegram.chat_id,
-                                     self.tr("alarm_on_manual") + "\n" +
-                                     self.tr("auto_on_detail", n=self.config.detection.auto_resolve_frames))
-            else:
-                # Manual mode: alarm waits for manual /togglealarm
-                self.tg.send_message(self.config.telegram.chat_id,
-                                     self.tr("alarm_on_manual") + "\n" + self.tr("manual_only"))
+            # Manual trigger duplicates the automatic alarm behavior
+            # but switches THIS alarm to manual mode.
+            self.trigger_alarm(self.tr("force_alarm"), frame, manual=True)
     
-    def cancel_alarm(self, note: str = ""):
-        # Save the alarm camera BEFORE deactivate() (it resets alarm_camera_id)
-        cam_id = self.alarm.alarm_camera_id
-        result = self.alarm.deactivate(keep_trigger=True)
+    def cancel_alarm(self, cam_id: Optional[int] = None, note: str = ""):
+        """Cancel alarm for a specific camera (or the last active one).
+
+        New protocol:
+        - the FIRST frame is restored into the alarm message (audit)
+        - frame pool is cleared
+        - manual cancel restores the global auto mode saved at manual trigger
+        - the camera stays ACTIVE (for /cam commands) until another takes over
+        """
+        if cam_id is None:
+            cams = self.alarm.active_cameras()
+            cam_id = cams[-1] if cams else self.alarm.alarm_camera_id
+        if cam_id is None:
+            return
+
+        state = self.alarm.get(cam_id)
+        if not state.is_active:
+            return
+
+        # Restore the FIRST frame into the single alarm message (audit trail)
+        if state.msg_id and state.first_frame is not None:
+            try:
+                ok, buf = cv2.imencode(".jpg", state.first_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                if ok:
+                    cam_name = self.config.cameras.get(
+                        cam_id, CameraConfig(cam_id=cam_id, name=f"Camera {cam_id}", url="")).name
+                    caption = (f"{self.tr('alert')}\n\n📅 {time.strftime('%H:%M:%S')}\n"
+                               f"📷 {self.tr('camera')}: {cam_name}\n\n"
+                               f"📷 {self.tr('trigger_frame')}")
+                    self.tg.edit_message_media(self.config.telegram.chat_id, state.msg_id, buf.tobytes(), caption)
+            except Exception as e:
+                print(f"  Restore first frame error: {e}")
+
+        # Turn off actuators for this camera
+        self.set_actuators(False, cam_id)
+
+        # Deactivate per-camera alarm (manual cancel restores global auto mode)
+        result = self.alarm.deactivate(cam_id, keep_trigger=True)
         if result.get("already_inactive"):
             return
-        
-        # Turn off actuators for the alarm camera
-        if cam_id:
-            self.set_actuators(False, cam_id)
-        
+
         # Desktop bridge: publish resolved state
-        self.write_status(alarm_active=False)
-        
-        # Delete messages (except trigger)
+        self.write_status()
+
+        # Delete leftover messages (none in single-msg protocol, kept for safety)
         for mid in result.get("delete_msg_ids", []):
             self.tg.delete_message(self.config.telegram.chat_id, mid)
-        
+
         if note:
             self.tg.send_message(self.config.telegram.chat_id, note)
         self.tg.send_message(self.config.telegram.chat_id, self.tr("alarm_off"))
@@ -655,10 +687,9 @@ class SuperGuardBot:
                                 f"🔍 {self.tr('target_set')}: {text}\n🔍 {self.tr('target_filter')}: {target.filter_label()}")
     
     def switch_camera(self, cam_id: int):
-        if self.alarm.is_active:
-            self.alarm.alarm_camera_id = cam_id
-        
-        self.active_camera_id = cam_id
+        # Manual camera switch: alarms per-camera stay as they are;
+        # only the "active camera" (command target) changes.
+        self.alarm.active_camera_id = cam_id
         self.camera_manager.set_active(cam_id)
         
         # Load settings for new camera
@@ -697,108 +728,102 @@ class SuperGuardBot:
     
     # ----- Alarm Trigger & Updates -----
     
-    def trigger_alarm(self, desc: str, frame: np.ndarray, cam_id: Optional[int] = None):
-        # Use the camera that triggered the alarm (from detection loop) or active camera (manual)
-        cam_id = cam_id or self.active_camera_id
-        # Manual trigger duplicates automatic alarm: preserve the current auto_mode.
+    def trigger_alarm(self, desc: str, frame: np.ndarray, cam_id: Optional[int] = None,
+                      manual: bool = False):
+        """Trigger alarm for a specific camera (concurrent with other cameras).
+
+        New protocol:
+        - ONE alarm message per camera: trigger frame sent, then the SAME message
+          is updated every update_every s with frames from the temp frame pool.
+        - manual=True forces manual mode for this alarm; manual cancel restores
+          the global auto mode.
+        - camera stays ACTIVE until another camera triggers (auto or manual).
+        """
+        cam_id = cam_id or self.alarm.active_camera_id
+        state = self.alarm.get(cam_id)
+
+        # Manual trigger duplicates automatic alarm but switches THIS alarm to manual.
         # auto_mode=True  -> alarm auto-cancels when the target leaves the zone
         # auto_mode=False -> alarm stays until manual /togglealarm
-        if not self.alarm.activate(cam_id, auto=self.alarm.auto_mode):
+        if not self.alarm.activate(cam_id, auto=self.alarm.auto_mode, manual=manual):
             return
-        
+
         # The triggering camera BECOMES the active camera and stays active
         # until another camera becomes active (via alarm or /cam command).
-        if self.active_camera_id != cam_id:
-            self.active_camera_id = cam_id
+        if self.alarm.active_camera_id != cam_id:
+            self.alarm.active_camera_id = cam_id
             self.camera_manager.set_active(cam_id)
             self.load_camera_settings()
-        
+
         # Turn on actuators for the triggering camera
         self.set_actuators(True, cam_id)
-        
+
+        # Frame pool: first (trigger) frame stored for restore-on-cancel
+        state.first_frame = frame.copy()
+        state.frame_pool = [frame]
+
         # Desktop bridge: publish alarm state + first frame
         self.write_status()
         self.write_alarm_frame(frame)
-        
-        # Send trigger frame (msg A)
+
+        # Send trigger frame (the single alarm message for this camera)
         ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         frame_bytes = buf.tobytes()
-        
+
         cam_name = self.config.cameras.get(cam_id, CameraConfig(cam_id=cam_id, name=f"Camera {cam_id}", url="")).name
         caption = (f"{self.tr('alert')}\n\n📅 {time.strftime('%H:%M:%S')}\n{desc}\n"
                    f"\n🔍 {self.tr('looking_for')}: {self.target_label()}\n"
                    f"📍 {self.tr('zone')}: {self.zone_label()}\n"
                    f"📷 {self.tr('camera')}: {cam_name}\n\n"
                    f"📷 {self.tr('trigger_frame')}")
-        
+
         res = self.tg.send_photo(self.config.telegram.chat_id, frame_bytes, caption)
         if not res:
-            self.cancel_alarm()
+            self.cancel_alarm(cam_id=cam_id)
             return
-        
-        self.alarm.trigger_msg_id = res["message_id"]
-        self.alarm.known_msg_ids.add(res["message_id"])
+
+        state.msg_id = res["message_id"]
+        state.known_msg_ids.add(res["message_id"])
         self.save_local(frame_bytes)
-        
-        # Send live frame (msg B) after 1 second
-        threading.Thread(target=self._send_live_after_delay, daemon=True).start()
-    
-    def _send_live_after_delay(self):
-        """Send the first live frame (msg B) ~1s after trigger, then start the update loop."""
-        try:
-            time.sleep(1.0)
-            cam_id = self.alarm.alarm_camera_id
-            cam = self.camera_manager.get(cam_id) if cam_id else None
-            live = cam.latest if cam else None
-            
-            if live is None:
-                return
-            
-            ok, buf = cv2.imencode(".jpg", live, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-            if not ok:
-                return
-            
-            cam_name = self.config.cameras.get(cam_id, CameraConfig(cam_id=cam_id, name=f"Camera {cam_id}", url="")).name
-            caption = (f"{self.tr('alert')}\n\n📅 {time.strftime('%H:%M:%S')}\n"
-                       f"📺 {self.tr('live_frame')}\n"
-                       f"📷 {self.tr('camera')}: {cam_name}")
-            
-            res = self.tg.send_photo(self.config.telegram.chat_id, buf.tobytes(), caption)
-            if res:
-                self.alarm.live_msg_id = res["message_id"]
-                self.alarm.known_msg_ids.add(res["message_id"])
-                self.save_local(buf.tobytes())
-                # Desktop bridge: fresh alarm frame
-                self.write_alarm_frame(live)
-                # Start update loop
-                threading.Thread(target=self._update_loop, daemon=True).start()
-        except Exception as e:
-            print(f"  Live frame send error: {e}")
-    
-    def _update_loop(self):
-        """Update the live frame (msg B) every update_every seconds while alarm is active."""
+
+        # Start the live-frame update loop for THIS camera (per-camera thread)
+        threading.Thread(target=self._update_loop, args=(cam_id,), daemon=True).start()
+
+        # Manual trigger notification — this alarm is now in manual mode
+        if manual:
+            self.tg.send_message(self.config.telegram.chat_id,
+                                 self.tr("alarm_on_manual") + "\n" + self.tr("manual_only"))
+
+    def _update_loop(self, cam_id: int):
+        """Per-camera: update the alarm message every update_every s with the
+        latest frame from the temp pool while THIS camera's alarm is active."""
+        state = self.alarm.get(cam_id)
         while True:
             time.sleep(self.config.detection.update_every)
-            if not self.alarm.is_active:
+            if not state.is_active:
                 return
-            
-            mid = self.alarm.live_msg_id
-            cam_id = self.alarm.alarm_camera_id
-            if mid is None or cam_id is None:
+
+            mid = state.msg_id
+            if mid is None:
                 continue
-            
+
             cam = self.camera_manager.get(cam_id)
             if not cam:
                 continue
-            
+
             frame = cam.latest
             if frame is None:
                 continue
-            
+
+            # Push into temp pool (bounded), update message with newest frame
+            state.frame_pool.append(frame)
+            if len(state.frame_pool) > 60:
+                state.frame_pool.pop(0)
+
             ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
             if not ok:
                 continue
-            
+
             caption = f"{self.tr('alert')}\n\n📅 {time.strftime('%H:%M:%S')}\n📺 {self.tr('live_frame')}"
             try:
                 if self.tg.edit_message_media(self.config.telegram.chat_id, mid, buf.tobytes(), caption):
@@ -979,12 +1004,14 @@ class SuperGuardBot:
         import os, json
         d = self._state_dir()
         settings = self.get_active_settings()
-        plugs = self.actuator_manager.camera_bindings.get(self.active_camera_id, [])
+        plugs = self.actuator_manager.camera_bindings.get(self.alarm.active_camera_id, [])
+        active_cams = self.alarm.active_cameras()
         state = {
-            "active_camera": self.active_camera_id,
+            "active_camera": self.alarm.active_camera_id,
             "auto_mode": bool(self.alarm.auto_mode),
-            "alarm_active": self.alarm.is_active if alarm_active is None else alarm_active,
+            "alarm_active": self.alarm.any_active() if alarm_active is None else alarm_active,
             "alarm_camera": self.alarm.alarm_camera_id,
+            "active_alarm_cameras": active_cams,  # concurrent alarms protocol
             "zone": str(settings.zone) if settings.zone else "",
             "target": settings.target.description if settings.target and settings.target.description else "",
             "plugs": list(plugs),
@@ -1039,7 +1066,10 @@ class SuperGuardBot:
             m = upd["message"]
             mid = m.get("message_id")
             if mid:
-                self.alarm.known_msg_ids.add(mid)
+                # Track incoming messages so callbacks know which alarm to edit.
+                # Per-camera alarms own their msg_id; here we only need to avoid
+                # deleting user messages on cancel (alarms track their own ids).
+                pass
             
             text = (m.get("text") or "").strip()
             ctx = CommandContext(
@@ -1096,19 +1126,19 @@ class SuperGuardBot:
                           + ", ".join(f"{d.name} c={d.confidence:.2f} y={d.color_fraction*100:.0f}%" for d in all_dets) or "empty")
                 print(status, flush=True)
                 
-                # Trigger alarm (pass the camera that triggered it!)
-                if streak[cam_id] >= self.config.detection.require_frames and not self.alarm.is_active:
+                # Trigger alarm for THIS camera (concurrent, no global lock)
+                if streak[cam_id] >= self.config.detection.require_frames and not self.alarm.is_cam_active(cam_id):
                     m = matches[0]
                     desc = (f"{self.tr('yellow_found')}\n"
                             f"({m.name} conf={m.confidence:.2f}, color={m.color_fraction*100:.0f}%)")
                     self.trigger_alarm(desc, frame, cam_id=cam_id)
-                    break
+                    streak[cam_id] = 0  # prevent re-trigger spam while active
             
-            # Auto-resolve
-            if self.alarm.is_active and self.alarm.auto_mode:
-                alarm_cam = self.alarm.alarm_camera_id
-                if clean.get(alarm_cam, 0) >= self.config.detection.auto_resolve_frames:
-                    self.cancel_alarm(note=self.tr("threat_gone"))
+            # Auto-resolve per camera: each alarm resolves independently
+            for alarm_cam in list(self.alarm.active_cameras()):
+                state = self.alarm.get(alarm_cam)
+                if state.auto_mode and clean.get(alarm_cam, 0) >= self.config.detection.auto_resolve_frames:
+                    self.cancel_alarm(cam_id=alarm_cam, note=self.tr("threat_gone"))
 
 
 # ============================================================================
