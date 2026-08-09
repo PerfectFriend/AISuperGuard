@@ -130,18 +130,29 @@ class SuperGuardApplication:
 
 
 def kill_other_instances():
-    """Kill other python.exe processes running panic_mode or main.py."""
-    import subprocess
-    import os
-    mypid = os.getpid()
-    # Use taskkill /F /FI instead of PowerShell for reliability
+    """Kill other python.exe processes running panic_mode or main.py (safe, cmdline-filtered)."""
     try:
-        r = subprocess.run(
-            ["taskkill", "/F", "/FI", "IMAGENAME eq python.exe", "/FI", f"PID ne {mypid}"],
-            capture_output=True, text=True, timeout=20, encoding="utf-8", errors="ignore"
-        )
-        if r.stdout.strip():
-            print(f"  Killed stale instances: {r.stdout.strip()}")
+        import psutil
+        mypid = os.getpid()
+        killed = []
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if proc.info["pid"] == mypid:
+                    continue
+                name = (proc.info["name"] or "").lower()
+                if "python" not in name:
+                    continue
+                cmdline = " ".join(proc.info["cmdline"] or [])
+                cl = cmdline.lower()
+                if "watchdog" in cl:
+                    continue  # never kill the watchdog itself
+                if "superguard.main" in cl or "superguard\\main.py" in cl or "superguard/main.py" in cl or "panic_mode" in cl:
+                    proc.kill()
+                    killed.append(proc.info["pid"])
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if killed:
+            print(f"  Killed stale instances: {killed}")
     except Exception as e:
         print(f"  Zombie kill error: {e}")
 

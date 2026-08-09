@@ -35,7 +35,7 @@ class SuperGuardWatchdog:
         if not python_exe.exists():
             python_exe = sys.executable
         
-        cmd = [str(python_exe), "-m", "superguard.main"]
+        cmd = [str(python_exe), str(BASE_DIR / "run_bot.py")]
         
         print(f"[{time.strftime('%H:%M:%S')}] Starting SuperGuard: {' '.join(cmd)}")
         
