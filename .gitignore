@@ -1,43 +1,48 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-.venv/
+*.py[cod]
+*$py.class
+*.so
+.Python
 venv/
-*.egg-info/
+env/
+ENV/
 
-# Runtime state
-desktop_state/
-saved_frames/
+# SuperGuard local config (SECRETS!)
+sguard.env
 sguard_settings.json
+
+# Logs
 *.log
-
-# Desktop build artifacts
-desktop/build/
-desktop/dist/
-desktop/*.spec
-
-# Models (downloaded by ultralytics on first run)
-*.pt
+superguard.log
+superguard_err.log
 
 # OS
+.DS_Store
 Thumbs.db
-desktop.ini
 
-# Local config with secrets - keep the example only
-sguard.env
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# Test files
-run_test.py
+# Test/temp files
+*.jpg
+*.png
+*.bin
+*.html
+frames/
+panic_frames/
+alarm_frames/
+live/
+live2/
+conf_scale/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# PowerShell temp
 kill_zombies.ps1
-
-# Evolution cron runtime state
-evolution_state.json
-bg_test.txt
-bot_probe.py
-sig_probe.py
-probe_bg.log
-bot.log
-bot_probe.log
-watchdog.log
-direct_test.log
