@@ -57,23 +57,29 @@ def run_tests():
     print("\n[1/4] Running tests...")
     test_script = SUPERGUARD_DIR / "tests" / "test_all.py"
     if not test_script.exists():
-        print(f"  �� Test script not found: {test_script}")
+        print(f"  ���� Test script not found: {test_script}")
         return False
 
-    result = subprocess.run(
-        [sys.executable, str(test_script)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=PROJECT_ROOT,
-    )
-    print(result.stdout)
-    if result.stderr:
-        print(result.stderr)
-
-    success = result.returncode == 0
-    print(f"  {'���' if success else '���'} Tests {'PASSED' if success else 'FAILED'}")
-    return success
+    # Run tests in-process to avoid encoding issues
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("test_all", test_script)
+    test_module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(test_module)
+        print("  ����� Tests PASSED")
+        return True
+    except SystemExit as e:
+        if e.code == 0:
+            print("  ����� Tests PASSED")
+            return True
+        else:
+            print(f"  ����� Tests FAILED (exit code {e.code})")
+            return False
+    except Exception as e:
+        print(f"  ����� Tests FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 def run_debug_checks():
@@ -86,10 +92,11 @@ def run_debug_checks():
         result = subprocess.run(
             ["tasklist"],
             capture_output=True,
-            text=True,
+            text=False,  # Get bytes
             timeout=10,
         )
-        checks["bot_running"] = "panic_mode.py" in result.stdout or "run_bot.py" in result.stdout
+        output = result.stdout.decode('cp866', errors='replace')
+        checks["bot_running"] = "panic_mode.py" in output or "run_bot.py" in output
     except Exception:
         checks["bot_running"] = False
 
@@ -116,30 +123,46 @@ def run_backup():
     try:
         backup_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_file = backup_dir / f"superguard_backup_{timestamp}.tar.gz"
+        backup_file = backup_dir / f"superguard_backup_{timestamp}.zip"
 
-        # Create tar.gz of project (excluding large files)
-        result = subprocess.run(
-            [
-                "tar", "-czf", str(backup_file),
-                "--exclude=*.jpg", "--exclude=*.pt", "--exclude=__pycache__",
-                "--exclude=.git", "--exclude=.hermes", "--exclude=superguard_light*",
-                "--exclude=desktop", "--exclude=desktop_state",
-                ".",
-            ],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if result.returncode == 0:
-            print(f"  �� Backup created: {backup_file}")
-            return True
-        else:
-            print(f"  �� Backup failed: {result.stderr}")
+        # Create zip of project (excluding large files)
+        import zipfile
+        exclude_patterns = [
+            "*.jpg", "*.pt", "__pycache__", ".git", ".hermes",
+            "superguard_light*", "desktop", "desktop_state",
+            "snap*.jpg", "yolo11n.pt", "nssm.exe"
+        ]
+
+        def should_exclude(path: Path) -> bool:
+            """Check if path matches any exclude pattern."""
+            path_str = str(path)
+            for pattern in exclude_patterns:
+                # Simple glob matching
+                import fnmatch
+                if fnmatch.fnmatch(path.name, pattern):
+                    return True
+                # Check parent directories
+                for part in path.parts:
+                    if fnmatch.fnmatch(part, pattern):
+                        return True
             return False
+
+        with zipfile.ZipFile(backup_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in PROJECT_ROOT.rglob("*"):
+                if file_path.is_file():
+                    rel_path = file_path.relative_to(PROJECT_ROOT)
+                    if not should_exclude(rel_path):
+                        try:
+                            zipf.write(file_path, rel_path)
+                        except Exception:
+                            pass  # Skip files that can't be read
+
+        print(f"  ���� Backup created: {backup_file}")
+        return True
     except Exception as e:
-        print(f"  �� Backup error: {e}")
+        print(f"  ����� Backup error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
