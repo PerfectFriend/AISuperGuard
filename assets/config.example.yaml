@@ -1,0 +1,55 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  CableGuard — config.example.yaml
+#  Скопируй в config.yaml и впиши свои значения:
+#    cp config.example.yaml config.yaml
+# ═══════════════════════════════════════════════════════════════════════════
+
+camera:
+  streams:
+    - name: "cam-1"
+      url: "rtsp://user:pass@192.168.1.50:554/stream1"   # ← IP и путь твоей камеры
+      enabled: true
+      zones:
+        - name: "cable-zone"
+          polygon: [[0.0, 0.0], [1.0, 0.0], [1.0, 0.35], [0.0, 0.35]]  # верх кадра = кабель
+
+# Детекция
+detection:
+  model: "yolo11n.pt"           # базовая модель (COCO)
+  conf_threshold: 0.45
+  iou_threshold: 0.45
+  frame_interval: 3
+  imgsz: 640
+
+# Классы, вызывающие тревогу
+alert_classes:
+  - "person"
+
+# Тревога
+alert:
+  cooldown_seconds: 120          # пауза между тревогами на камеру
+  require_frames: 2              # подтверждение на N кадрах (анти-ложные)
+  send_snapshot: true
+  send_video: false              # включить при наличии ffmpeg
+  video_seconds: 30
+  telegram_channel: null         # chat_id (число) — как его получить, см. README
+  message_template: |
+    🚨 ¡ALERTA! {event}
+    Cámara: {camera}
+    Zona: {zone}
+    Objeto: {label} ({conf:.0%})
+    Hora: {time}
+
+# WiFi-исполнительное устройство (прожектор + сирена)
+actuator:
+  mode: "sim"                    # sim | esp32 | webhook
+  base_url: "http://192.168.1.50"     # IP ESP32 (mode=esp32)
+  webhook_url: "http://192.168.1.60/alarm"
+  on_path: "/on"
+  off_path: "/off"
+  duration_seconds: 30
+
+# Журнал
+log:
+  dir: "logs"
+  keep_days: 30

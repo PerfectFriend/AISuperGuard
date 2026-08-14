@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Runtime state
+desktop_state/
+saved_frames/
+sguard_settings.json
+*.log
+
+# Desktop build artifacts
+desktop/build/
+desktop/dist/
+desktop/*.spec
+
+# Models (downloaded by ultralytics on first run)
+*.pt
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Local config with secrets - keep the example only
+sguard.env
+
+# Test files
+run_test.py
+kill_zombies.ps1
+
+# Evolution cron runtime state
+evolution_state.json
+bg_test.txt
+bot_probe.py
+sig_probe.py
+probe_bg.log
+bot.log
+bot_probe.log
+watchdog.log
+direct_test.log
