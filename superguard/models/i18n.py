@@ -1,0 +1,28 @@
+# i18n module for SuperGuard - Russian/English/Spanish translations
+
+def tr(key: str, lang: str = "ru") -> str:
+    """Simple translation function."""
+    translations = {
+        "ru": {
+            "any_color": "любой цвет",
+            "yellow": "жёлтый",
+            "custom_color": "пользовательский цвет",
+            "classes": "классы",
+            "color": "цвет",
+        },
+        "en": {
+            "any_color": "any color",
+            "yellow": "yellow",
+            "custom_color": "custom color",
+            "classes": "classes",
+            "color": "color",
+        },
+        "es": {
+            "any_color": "cualquier color",
+            "yellow": "amarillo",
+            "custom_color": "color personalizado",
+            "classes": "clases",
+            "color": "color",
+        }
+    }
+    return translations.get(lang, translations["ru"]).get(key, key)

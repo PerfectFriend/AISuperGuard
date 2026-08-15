@@ -10,10 +10,22 @@ Actuator abstraction layer supporting multiple device types:
 
 BaseActuator ABC defines the interface. Each implementation handles
 its own protocol. ActuatorRegistry manages type registration and instantiation.
+
+Key features:
+- Thread-safe operations (per-actuator locks)
+- Local Tuya control via tinytuya with ARP-based IP rediscovery on DHCP renew
+- Cloud Tuya control via Tuya Cloud API (works from anywhere)
+- Automatic retry with IP rediscovery on connection failures
+- Per-camera actuator bindings (many-to-many)
+- Persistent binding storage in SettingsStore
 """
+
 import threading
 import time
 import json
+import hmac
+import hashlib
+import requests
 from abc import ABC, abstractmethod
 from typing import Dict, Type, Optional, Any, List
 from dataclasses import dataclass
@@ -26,7 +38,19 @@ from ..config import TuyaPlugConfig, SuperGuardConfig
 # ============================================================================
 
 class BaseActuator(ABC):
-    """Abstract base class for all actuators (switches, relays, lights, sirens, etc.)."""
+    """Abstract base class for all actuators (switches, relays, lights, sirens, etc.).
+    
+    Defines the standard interface that all actuator implementations must provide.
+    Each actuator runs in its own thread context, so implementations should be
+    thread-safe or use the provided _lock.
+    
+    Attributes:
+        config: Raw configuration dict passed at creation
+        name: Human-readable name (from config["name"])
+        _lock: Threading lock for thread-safe operations
+        _last_status: Cached last known ON/OFF status
+        _last_power: Cached last known power reading (watts)
+    """
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -59,7 +83,11 @@ class BaseActuator(ABC):
         return None
     
     def health_check(self) -> bool:
-        """Check if actuator is responsive. Default: try get_status."""
+        """Check if actuator is responsive. Default: try get_status.
+        
+        Returns:
+            True if get_status() succeeds (doesn't raise), False otherwise
+        """
         try:
             return self.get_status() is not None
         except Exception:
@@ -74,7 +102,15 @@ class BaseActuator(ABC):
 # ============================================================================
 
 class ActuatorRegistry:
-    """Singleton registry for actuator types."""
+    """Singleton registry for actuator types.
+    
+    Maps string type names (e.g., "tuya", "tuya_cloud") to actuator classes.
+    Thread-safe registration and lookup.
+    
+    Usage:
+        ActuatorRegistry.register("tuya", TuyaActuator)
+        actuator = ActuatorRegistry.create("tuya", config_dict)
+    """
     
     _instance: Optional['ActuatorRegistry'] = None
     _lock = threading.Lock()
@@ -89,20 +125,43 @@ class ActuatorRegistry:
     
     @classmethod
     def register(cls, name: str, actuator_class: Type[BaseActuator]):
-        """Register an actuator type by name."""
+        """Register an actuator type by name.
+        
+        Args:
+            name: Type identifier (lowercase, e.g., "tuya", "sonoff")
+            actuator_class: Class inheriting from BaseActuator
+        """
         instance = cls()
         with instance._lock:
             instance._actuators[name.lower()] = actuator_class
     
     @classmethod
     def get(cls, name: str) -> Optional[Type[BaseActuator]]:
-        """Get actuator class by name."""
+        """Get actuator class by name.
+        
+        Args:
+            name: Type identifier (case-insensitive)
+            
+        Returns:
+            Actuator class or None if not registered
+        """
         instance = cls()
         return instance._actuators.get(name.lower())
     
     @classmethod
     def create(cls, name: str, config: Dict[str, Any]) -> BaseActuator:
-        """Create actuator instance by type name."""
+        """Create actuator instance by type name.
+        
+        Args:
+            name: Registered type name
+            config: Configuration dict for actuator constructor
+            
+        Returns:
+            Actuator instance
+            
+        Raises:
+            ValueError: If type name not registered
+        """
         actuator_class = cls.get(name)
         if not actuator_class:
             raise ValueError(f"Unknown actuator type: {name}")
@@ -110,7 +169,7 @@ class ActuatorRegistry:
     
     @classmethod
     def list_types(cls) -> List[str]:
-        """List registered actuator types."""
+        """List registered actuator type names."""
         instance = cls()
         return list(instance._actuators.keys())
 
@@ -124,7 +183,26 @@ actuator_registry = ActuatorRegistry()
 # ============================================================================
 
 class TuyaCloudActuator(BaseActuator):
-    """Tuya Smart Plug actuator using Tuya Cloud API (works from anywhere, no local IP needed)."""
+    """Tuya Smart Plug actuator using Tuya Cloud API (works from anywhere, no local IP needed).
+    
+    Uses Tuya IoT Platform Cloud API with HMAC-SHA256 signatures.
+    Requires: device_id, access_id, access_secret from Tuya Cloud project.
+    
+    Advantages:
+    - Works from any network (no local connectivity needed)
+    - Can control plugs when away from home network
+    - Provides power/energy monitoring via cloud
+    
+    Disadvantages:
+    - Requires internet connectivity
+    - Rate limited by Tuya
+    - Higher latency (cloud round-trip)
+    - Currently returns error 1108 (project config issue)
+    
+    DPS (Data Point) codes for standard Tuya plugs:
+    - DPS_RELAY = "1": Relay switch (boolean)
+    - "cur_power": Current power in 0.1W units
+    """
     
     # Standard Tuya Cloud DPS codes
     DPS_RELAY = "1"      # Relay switch (bool)
@@ -154,15 +232,32 @@ class TuyaCloudActuator(BaseActuator):
         self._token: Optional[str] = None
         self._token_expire: float = 0
         self._lock = threading.Lock()
-        
+    
     def _get_sign(self, t: str) -> str:
-        """Generate HMAC-SHA256 signature."""
+        """Generate HMAC-SHA256 signature for Tuya Cloud API.
+        
+        Signature = HMAC-SHA256(access_secret, access_id + timestamp)
+        Returned as uppercase hex string.
+        
+        Args:
+            t: Timestamp in milliseconds as string
+            
+        Returns:
+            Uppercase hex signature
+        """
         msg = f"{self.access_id}{t}".encode()
         key = self.access_secret.encode()
         return hmac.new(key, msg, hashlib.sha256).hexdigest().upper()
     
     def _get_token(self) -> bool:
-        """Obtain access token from Tuya Cloud."""
+        """Obtain access token from Tuya Cloud.
+        
+        Calls /v1.0/token with grant_type=1.
+        Stores token and expiry (with 60s buffer).
+        
+        Returns:
+            True if token obtained successfully
+        """
         import time
         t = str(int(time.time() * 1000))
         sign = self._get_sign(t)
@@ -186,7 +281,14 @@ class TuyaCloudActuator(BaseActuator):
         return False
     
     def _headers(self) -> Optional[Dict[str, str]]:
-        """Get authenticated headers, refreshing token if needed."""
+        """Get authenticated headers, refreshing token if needed.
+        
+        Thread-safe token management. Refreshes if expired or missing.
+        
+        Returns:
+            Headers dict with client_id, access_token, sign, t, sign_method
+            or None if token acquisition failed
+        """
         import time
         with self._lock:
             if not self._token or time.time() >= self._token_expire:
@@ -203,7 +305,14 @@ class TuyaCloudActuator(BaseActuator):
             }
     
     def _send_command(self, commands: List[Dict]) -> bool:
-        """Send command to device via Tuya Cloud API."""
+        """Send command to device via Tuya Cloud API.
+        
+        Args:
+            commands: List of {"code": dps_code, "value": value} dicts
+            
+        Returns:
+            True if API returns success=true
+        """
         headers = self._headers()
         if not headers:
             return False
@@ -238,7 +347,10 @@ class TuyaCloudActuator(BaseActuator):
         return result
     
     def get_status(self) -> bool:
-        """Get current relay status via Cloud API."""
+        """Get current relay status via Cloud API.
+        
+        Returns cached status if API unavailable.
+        """
         headers = self._headers()
         if not headers:
             return self._last_status if self._last_status is not None else False
@@ -262,7 +374,10 @@ class TuyaCloudActuator(BaseActuator):
         return self._last_status if self._last_status is not None else False
     
     def get_power(self) -> Optional[float]:
-        """Get current power consumption in watts via Cloud API."""
+        """Get current power consumption in watts via Cloud API.
+        
+        Returns power in watts (API returns 0.1W units).
+        """
         headers = self._headers()
         if not headers:
             return None
@@ -294,9 +409,32 @@ actuator_registry.register("tuya-cloud", TuyaCloudActuator)
 # ============================================================================
 
 class TuyaActuator(BaseActuator):
-    """Tuya Smart Plug actuator using local control (tinytuya 3.4+)."""
+    """Tuya Smart Plug actuator using local control (tinytuya 3.4+).
     
-    # DPS codes for standard Tuya plugs
+    Direct LAN control via Tuya's local protocol (encrypted with local_key).
+    No internet required - works entirely on local network.
+    
+    Key features:
+    - ARP-based IP rediscovery: On DHCP renew (mobile hotspot), discovers
+      new IP by MAC address from ARP table
+    - Automatic retry with IP rediscovery on connection failures
+    - Thread-safe device connection management
+    - Power/voltage monitoring via local DPS codes
+    
+    DPS codes for standard Tuya plugs (tinytuya uses integer DPS):
+    - DPS_RELAY = 1: Relay switch (bool)
+    - DPS_VOLTAGE = 20: Voltage (0.1V units)
+    - DPS_POWER = 22: Power (0.1W units)
+    - DPS_ENERGY = 23: Energy (Wh)
+    
+    Required config:
+    - ip: Current IP address (may change on DHCP)
+    - device_id: 20-char Tuya device ID
+    - local_key: 16-char local encryption key
+    - mac: MAC address for ARP rediscovery (format: aa:bb:cc:dd:ee:ff)
+    """
+    
+    # DPS codes for standard Tuya plugs (integer for tinytuya)
     DPS_RELAY = 1      # Relay (bool)
     DPS_VOLTAGE = 20   # Voltage (0.1V units)
     DPS_POWER = 22     # Power (0.1W units)
@@ -311,6 +449,8 @@ class TuyaActuator(BaseActuator):
         self.ip = config.get("ip")
         self.device_id = config.get("device_id")
         self.local_key = config.get("local_key")
+        # MAC address for ARP-based IP discovery on DHCP renew
+        self.mac = config.get("mac", "").lower()
         
         if not all([self.ip, self.device_id, self.local_key]):
             raise ValueError("TuyaActuator requires ip, device_id, and local_key in config")
@@ -325,10 +465,26 @@ class TuyaActuator(BaseActuator):
         self._conn_lock = threading.Lock()
     
     def _get_device(self):
-        """Get or create Tuya device with fresh connection."""
+        """Get or create Tuya device with fresh connection.
+        
+        Lazy initialization with ARP-based IP discovery:
+        1. If device exists, return it
+        2. If MAC configured, try ARP discovery for current IP
+        3. Create new tinytuya.OutletDevice with current IP
+        4. Configure socket: non-persistent, timeout
+        
+        Thread-safe via _conn_lock.
+        """
         import tinytuya
         with self._conn_lock:
             if self._device is None:
+                # Try to discover IP if current one doesn't work
+                if self.mac:
+                    discovered_ip = self._discover_ip_by_mac()
+                    if discovered_ip and discovered_ip != self.ip:
+                        print(f"  ARP discovery: {self.name} IP changed from {self.ip} to {discovered_ip}")
+                        self.ip = discovered_ip
+                
                 self._device = tinytuya.OutletDevice(
                     dev_id=self.device_id,
                     address=self.ip,
@@ -339,126 +495,145 @@ class TuyaActuator(BaseActuator):
                 self._device.set_socketTimeout(self.connection_timeout)
             return self._device
     
+    def _discover_ip_by_mac(self) -> Optional[str]:
+        """Discover current IP address of the plug by MAC address from ARP table.
+        
+        Runs `arp -a` and parses output for the configured MAC.
+        Works on Windows and Linux (different output formats).
+        
+        Windows format: "  192.168.137.113       d8-c8-0c-d6-45-6c     dynamic"
+        Linux format:   "? (192.168.137.113) at d8:c8:0c:d6:45:6c [ether] on eth0"
+        
+        Returns:
+            IP address as string, or None if not found
+        """
+        if not self.mac:
+            return None
+        
+        try:
+            import subprocess
+            import re
+        
+            # Get ARP table
+            result = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                return None
+        
+            # Parse ARP table for our MAC
+            # Normalize MAC to lowercase with hyphens (Windows format)
+            mac_normalized = self.mac.replace(":", "-").lower()
+        
+            for line in result.stdout.split("\n"):
+                if mac_normalized in line.lower():
+                    # Extract IP from line (first IPv4 pattern)
+                    ip_match = re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", line)
+                    if ip_match:
+                        return ip_match.group(1)
+        
+            return None
+        except Exception as e:
+            print(f"  ARP discovery error for {self.name}: {e}")
+            return None
+    
     def _execute_with_retry(self, func, max_retries=2):
-        """Execute Tuya command with retry on connection failure."""
+        """Execute a function with retry on connection failure.
+        
+        On connection error (timeout, socket error, unreachable, refused):
+        1. Attempt ARP rediscovery if MAC available
+        2. If new IP found, update self.ip and force new device creation
+        3. Retry (up to max_retries times)
+        
+        Args:
+            func: Callable to execute (turn_on, turn_off, get_status, etc.)
+            max_retries: Maximum retry attempts (default 2 = 3 total tries)
+            
+        Returns:
+            Function result on success
+            
+        Raises:
+            Last exception if all retries exhausted
+        """
         last_error = None
         for attempt in range(max_retries + 1):
             try:
                 return func()
             except Exception as e:
                 last_error = e
-                if attempt < max_retries:
-                    # Force new connection on next attempt
-                    with self._conn_lock:
-                        self._device = None
-                    time.sleep(0.5)
-                else:
+                # Check if it's a connection error
+                error_str = str(e).lower()
+                if any(keyword in error_str for keyword in ["connection", "timeout", "socket", "unreachable", "refused"]):
+                    if self.mac and attempt < max_retries:
+                        print(f"  Connection error, attempting ARP rediscovery for {self.name} (attempt {attempt + 1}/{max_retries})")
+                        discovered_ip = self._discover_ip_by_mac()
+                        if discovered_ip and discovered_ip != self.ip:
+                            print(f"  ARP discovery: {self.name} IP changed from {self.ip} to {discovered_ip}")
+                            self.ip = discovered_ip
+                            # Force new device creation on next call
+                            with self._conn_lock:
+                                self._device = None
+                            continue
+                if attempt == max_retries:
                     raise
         raise last_error
     
     def turn_on(self) -> bool:
-        """Turn the plug ON."""
-        def _on():
+        """Turn the plug ON via local control with retry."""
+        def _do():
             device = self._get_device()
-            result = device.set_value(self.DPS_RELAY, True)
-            return result
-        
-        try:
-            result = self._execute_with_retry(_on)
+            result = device.set_status(True, self.DPS_RELAY)
             if result:
                 self._last_status = True
             return bool(result)
-        except Exception as e:
-            print(f"TuyaActuator turn_on failed: {e}")
-            return False
+        return self._execute_with_retry(_do)
     
     def turn_off(self) -> bool:
-        """Turn the plug OFF."""
-        def _off():
+        """Turn the plug OFF via local control with retry."""
+        def _do():
             device = self._get_device()
-            result = device.set_value(self.DPS_RELAY, False)
-            return result
-        
-        try:
-            result = self._execute_with_retry(_off)
+            result = device.set_status(False, self.DPS_RELAY)
             if result:
                 self._last_status = False
             return bool(result)
-        except Exception as e:
-            print(f"TuyaActuator turn_off failed: {e}")
-            return False
+        return self._execute_with_retry(_do)
     
     def get_status(self) -> bool:
-        """Get current relay status."""
-        def _status():
+        """Get current relay status via local control with retry."""
+        def _do():
             device = self._get_device()
-            data = device.status()
-            if data and "dps" in data:
-                return bool(data["dps"].get(self.DPS_RELAY, False))
-            return False
-        
-        try:
-            status = self._execute_with_retry(_status)
-            self._last_status = status
-            return status
-        except Exception as e:
-            print(f"TuyaActuator get_status failed: {e}")
+            status = device.status()
+            if status and "dps" in status:
+                relay_state = status["dps"].get(str(self.DPS_RELAY), False)
+                self._last_status = bool(relay_state)
+                return bool(relay_state)
             return self._last_status if self._last_status is not None else False
+        return self._execute_with_retry(_do)
     
     def get_power(self) -> Optional[float]:
-        """Get current power consumption in watts."""
-        def _power():
+        """Get current power consumption in watts via local control with retry."""
+        def _do():
             device = self._get_device()
-            data = device.status()
-            if data and "dps" in data:
-                raw_power = data["dps"].get(self.DPS_POWER)
-                if raw_power is not None:
-                    return float(raw_power) / 10.0
+            status = device.status()
+            if status and "dps" in status:
+                power_raw = status["dps"].get(str(self.DPS_POWER), 0)
+                return float(power_raw) / 10.0
             return None
-        
-        try:
-            power = self._execute_with_retry(_power)
-            self._last_power = power
-            return power
-        except Exception as e:
-            print(f"TuyaActuator get_power failed: {e}")
-            return self._last_power
+        return self._execute_with_retry(_do)
     
     def get_voltage(self) -> Optional[float]:
-        """Get current voltage in volts."""
-        def _voltage():
+        """Get current voltage in volts via local control with retry."""
+        def _do():
             device = self._get_device()
-            data = device.status()
-            if data and "dps" in data:
-                raw_voltage = data["dps"].get(self.DPS_VOLTAGE)
-                if raw_voltage is not None:
-                    return float(raw_voltage) / 10.0
+            status = device.status()
+            if status and "dps" in status:
+                voltage_raw = status["dps"].get(str(self.DPS_VOLTAGE), 0)
+                return float(voltage_raw) / 10.0
             return None
-        
-        try:
-            return self._execute_with_retry(_voltage)
-        except Exception as e:
-            print(f"TuyaActuator get_voltage failed: {e}")
-            return None
-    
-    def get_energy(self) -> Optional[float]:
-        """Get total energy consumption in Wh."""
-        def _energy():
-            device = self._get_device()
-            data = device.status()
-            if data and "dps" in data:
-                return float(data["dps"].get(self.DPS_ENERGY, 0))
-            return None
-        
-        try:
-            return self._execute_with_retry(_energy)
-        except Exception as e:
-            print(f"TuyaActuator get_energy failed: {e}")
-            return None
+        return self._execute_with_retry(_do)
 
 
 # Auto-register
 actuator_registry.register("tuya", TuyaActuator)
+actuator_registry.register("tinytuya", TuyaActuator)
 
 
 # ============================================================================
@@ -466,138 +641,208 @@ actuator_registry.register("tuya", TuyaActuator)
 # ============================================================================
 
 class ActuatorManager:
-    """Manages actuator instances and camera-to-actuator bindings."""
+    """Manages multiple actuators and their camera bindings.
+    
+    Responsibilities:
+    - Instantiate actuators from config (via ActuatorRegistry)
+    - Manage many-to-many camera <-> actuator bindings
+    - Persist bindings to SettingsStore (camera_actuator_bindings)
+    - Provide ON/OFF control for all actuators bound to a camera
+    - Health checking and status reporting
+    
+    Binding flow:
+    1. Config defines actuator.cameras = [1,2,3] (which cameras this plug serves)
+    2. On init, _load_camera_bindings() reads persisted bindings from SettingsStore
+    3. If no persisted bindings, auto-creates from actuator.cameras config
+    4. User can modify via /plug command -> set_camera_binding() -> persists
+    5. On alarm: set_actuators(True, cam_id) turns ON all bound actuators
+    """
     
     def __init__(self, config: SuperGuardConfig):
         self.config = config
-        self.actuators: Dict[str, BaseActuator] = {}
-        self.camera_bindings: Dict[int, List[str]] = {}  # cam_id -> actuator names
-        self._init_from_config()
-    
-    def _init_from_config(self):
-        """Initialize actuators from config and build camera bindings."""
-        for plug_config in self.config.plugs:
-            # Create actuator instance
-            actuator_config = {
-                "name": plug_config.name,
-                "ip": plug_config.ip,
-                "device_id": plug_config.device_id,
-                "local_key": plug_config.local_key,
-                "version": plug_config.version,
-                "port": plug_config.port,
-                # Cloud API fields (for tuya_cloud type)
-                "access_id": plug_config.access_id,
-                "access_secret": plug_config.access_secret,
-                "region": plug_config.region,
-            }
-            
-            try:
-                actuator = actuator_registry.create(plug_config.type, actuator_config)
-                self.actuators[plug_config.name] = actuator
-                print(f"  Actuator '{plug_config.name}' ({plug_config.type}) initialized")
-            except Exception as e:
-                print(f"  Actuator '{plug_config.name}' init failed: {e}")
-                continue
-            
-            # Build camera -> actuator mapping
-            for cam_id in plug_config.cameras:
-                self.camera_bindings.setdefault(cam_id, []).append(plug_config.name)
+        self._actuators: Dict[str, BaseActuator] = {}
+        self._camera_bindings: Dict[int, List[str]] = {}  # cam_id -> [actuator_names]
+        self._lock = threading.Lock()
         
-        print(f"  Camera->Actuator map: {self.camera_bindings}")
+        # Initialize actuators from config
+        self._init_actuators()
     
-    def get_for_camera(self, cam_id: int) -> List[BaseActuator]:
-        """Get all actuators bound to a camera."""
-        names = self.camera_bindings.get(cam_id, [])
-        return [self.actuators[name] for name in names if name in self.actuators]
+    @property
+    def actuators(self) -> Dict[str, BaseActuator]:
+        """Get all actuators (for testing/debugging)."""
+        return self._actuators
+    
+    @property
+    def camera_bindings(self) -> Dict[int, List[str]]:
+        """Get camera-actuator bindings (for testing/debugging)."""
+        return self._camera_bindings
+    
+    def _init_actuators(self):
+        """Initialize all actuators from config.
+        
+        Iterates config.actuators (list of TuyaPlugConfig), creates each
+        via ActuatorRegistry.create(type, config_dict).
+        Then loads camera bindings from persistent storage.
+        """
+        if not self.config.actuators:
+            return
+        
+        for act_cfg in self.config.actuators:
+            try:
+                actuator = actuator_registry.create(act_cfg.type, act_cfg.__dict__)
+                self._actuators[act_cfg.name] = actuator
+                print(f"  Initialized actuator: {act_cfg.name} ({act_cfg.type})")
+            except Exception as e:
+                print(f"  Failed to init actuator {act_cfg.name}: {e}")
+        
+        # Load camera bindings from settings
+        self._load_camera_bindings()
+    
+    def _load_camera_bindings(self):
+        """Load camera-actuator bindings from persistent settings.
+        
+        Reads camera_actuator_bindings from SettingsStore.
+        Keys are camera IDs (stored as strings in JSON, converted to int).
+        
+        If no bindings found, AUTO-INITIALIZES from actuator config's 'cameras' field:
+        - For each actuator, for each camera in actuator.cameras
+        - Creates binding: cam_id -> [actuator_name, ...]
+        - Saves to persistent storage
+        """
+        try:
+            from ..storage import SettingsStore
+            store = SettingsStore(self.config)
+            settings = store.load()
+            bindings = settings.get("camera_actuator_bindings", {})
+            # Convert string keys to int
+            self._camera_bindings = {int(k): v for k, v in bindings.items()}
+        except Exception:
+            self._camera_bindings = {}
+        
+        # If no bindings in settings, initialize from actuator config's 'cameras' field
+        if not self._camera_bindings:
+            for act_cfg in self.config.actuators:
+                for cam_id in act_cfg.cameras:
+                    if cam_id not in self._camera_bindings:
+                        self._camera_bindings[cam_id] = []
+                    if act_cfg.name not in self._camera_bindings[cam_id]:
+                        self._camera_bindings[cam_id].append(act_cfg.name)
+            # Save initial bindings
+            self._save_camera_bindings()
+    
+    def _save_camera_bindings(self):
+        """Save camera-actuator bindings to persistent settings.
+        
+        Writes camera_actuator_bindings to SettingsStore.
+        Keys converted to strings for JSON compatibility.
+        Uses force_flush() for immediate write (atomic tmp+replace).
+        """
+        try:
+            from ..storage import SettingsStore
+            store = SettingsStore(self.config)
+            settings = store.load()
+            settings["camera_actuator_bindings"] = {str(k): v for k, v in self._camera_bindings.items()}
+            store.force_flush()
+        except Exception as e:
+            print(f"  Failed to save camera bindings: {e}")
+    
+    def set_camera_binding(self, cam_id: int, actuator_names: List[str]):
+        """Set actuator binding for a camera and persist.
+        
+        Args:
+            cam_id: Camera ID
+            actuator_names: List of actuator names to bind (empty = unbind all)
+        """
+        with self._lock:
+            self._camera_bindings[cam_id] = actuator_names
+            self._save_camera_bindings()
+    
+    def get_camera_bindings(self, cam_id: int) -> List[str]:
+        """Get actuator names bound to a camera."""
+        return self._camera_bindings.get(cam_id, [])
+    
+    def set_actuators(self, state: bool, cam_id: int) -> Dict[str, bool]:
+        """Turn ON/OFF all actuators bound to a camera.
+        
+        Called by SuperGuardBot on alarm trigger (True) and cancel (False).
+        
+        Args:
+            state: True = ON, False = OFF
+            cam_id: Camera ID to control actuators for
+            
+        Returns:
+            Dict of actuator_name -> success (bool)
+        """
+        actuators = self.get_camera_bindings(cam_id)
+        results = {}
+        for name in actuators:
+            actuator = self._actuators.get(name)
+            if actuator:
+                try:
+                    if state:
+                        results[name] = actuator.turn_on()
+                    else:
+                        results[name] = actuator.turn_off()
+                except Exception as e:
+                    print(f"  Actuator {name} error: {e}")
+                    results[name] = False
+            else:
+                results[name] = False
+        return results
     
     def get_actuator(self, name: str) -> Optional[BaseActuator]:
         """Get actuator by name."""
-        return self.actuators.get(name)
+        return self._actuators.get(name)
     
-    def set_camera_binding(self, cam_id: int, actuator_name: str):
-        """Bind camera to actuator (updates runtime binding)."""
-        if actuator_name not in self.actuators:
-            raise ValueError(f"Actuator {actuator_name} not found")
+    def list_all(self) -> Dict[str, Dict]:
+        """List all actuators with their status and power.
         
-        # Remove from other cameras
-        for cid, names in self.camera_bindings.items():
-            if actuator_name in names and cid != cam_id:
-                self.camera_bindings[cid].remove(actuator_name)
-        
-        # Add to new camera
-        self.camera_bindings.setdefault(cam_id, [])
-        if actuator_name not in self.camera_bindings[cam_id]:
-            self.camera_bindings[cam_id].append(actuator_name)
-    
-    def set_camera_bindings(self, cam_id: int, actuator_names: List[str]):
-        """Replace the full actuator binding list for a camera.
-        
-        The camera will drive exactly these actuators on alarm.
-        Bindings of other cameras are left untouched.
+        Returns:
+            Dict: name -> {type, status, power_w} or {error}
         """
-        valid = [n for n in actuator_names if n in self.actuators]
-        self.camera_bindings[cam_id] = valid
-    
-    def list_all(self) -> List[Dict]:
-        """List all actuators with status and bound cameras."""
-        result = []
-        for name, actuator in self.actuators.items():
-            # Find cameras bound to this actuator
-            cams = [cid for cid, names in self.camera_bindings.items() if name in names]
-            
-            # Test status
-            try:
-                status = actuator.get_status() if hasattr(actuator, 'get_status') else True
-                status_icon = "🟢" if status else "🔴"
-                status_text = "ONLINE" if status else "OFFLINE"
-            except Exception as e:
-                status_icon = "🔴"
-                status_text = f"ERROR: {e}"
-            
-            result.append({
-                "name": name,
-                "type": actuator.__class__.__name__,
-                "status": status_text,
-                "status_icon": status_icon,
-                "cameras": cams,
-            })
-        return result
-    
-    def test_all(self) -> List[Dict]:
-        """Test all actuators, auto-reconnect failed ones."""
-        results = []
-        for name, actuator in self.actuators.items():
+        result = {}
+        for name, actuator in self._actuators.items():
             try:
                 status = actuator.get_status()
-                if status:
-                    results.append({"name": name, "status": "OK", "reconnected": False})
-                    continue
+                power = actuator.get_power()
+                result[name] = {
+                    "type": type(actuator).__name__,
+                    "status": status,
+                    "power_w": power,
+                }
             except Exception as e:
-                results.append({"name": name, "status": f"ERROR: {e}", "reconnected": False})
-            
-            # Try to reconnect by reinitializing
-            # Find config for this actuator
-            plug_config = next((p for p in self.config.plugs if p.name == name), None)
-            if plug_config:
-                try:
-                    actuator_config = {
-                        "name": plug_config.name,
-                        "ip": plug_config.ip,
-                        "device_id": plug_config.device_id,
-                        "local_key": plug_config.local_key,
-                        "version": plug_config.version,
-                        "port": plug_config.port,
-                    }
-                    new_actuator = actuator_registry.create(plug_config.type, actuator_config)
-                    self.actuators[name] = new_actuator
-                    status = new_actuator.get_status()
-                    if status:
-                        results.append({"name": name, "status": "RECONNECTED", "reconnected": True})
-                    else:
-                        results.append({"name": name, "status": "FAILED", "reconnected": True})
-                except Exception as e:
-                    results.append({"name": name, "status": f"RECONNECT FAILED: {e}", "reconnected": True})
-            else:
-                results.append({"name": name, "status": "NO CONFIG", "reconnected": False})
+                result[name] = {"error": str(e)}
+        return result
+    
+    def test_all(self) -> Dict[str, bool]:
+        """Test all actuators (health check).
         
+        Returns:
+            Dict: name -> True/False (responsive)
+        """
+        results = {}
+        for name, actuator in self._actuators.items():
+            try:
+                results[name] = actuator.health_check()
+            except Exception:
+                results[name] = False
         return results
+    
+    def get_for_camera(self, cam_id: int) -> List[BaseActuator]:
+        """Get all actuator instances bound to a camera.
+        
+        Used by SuperGuardBot.set_actuators() for direct control.
+        
+        Args:
+            cam_id: Camera ID
+            
+        Returns:
+            List of BaseActuator instances
+        """
+        names = self.get_camera_bindings(cam_id)
+        return [self._actuators[n] for n in names if n in self._actuators]
+
+
+# Auto-register local Tuya
+actuator_registry.register("tuya", TuyaActuator)
+actuator_registry.register("tinytuya", TuyaActuator)

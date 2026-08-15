@@ -6,7 +6,22 @@ Provides:
 - CommandRouter: Command parsing and dispatch
 - CallbackHandler: Inline button callbacks
 - MenuManager: setMyCommands per-language
+- SuperGuardBot: Main application wiring all components
+
+Architecture:
+- Poll loop (long-poll getUpdates) in background thread
+- Detection loop (YOLO processing) in main thread
+- Per-camera alarm update loops (spawned per trigger)
+- All state persisted to JSON (SettingsStore + legacy settings file)
+- Desktop bridge via status.json + alarm_live.jpg
+
+Key protocols:
+- Concurrent per-camera alarms (AlarmManager + CameraAlarmState)
+- Single alarm message per camera (trigger frame -> live updates -> restore on cancel)
+- Manual trigger forces manual mode for that alarm; manual cancel restores global auto_mode
+- Annotated frames (YOLO boxes) sent to Telegram, not raw frames
 """
+
 import json
 import time
 import threading
@@ -21,7 +36,7 @@ from ..config import SuperGuardConfig, TelegramConfig, CameraConfig
 from ..models import Alarm, AlarmManager, CameraAlarmState, CameraSettings, Zone, Target, parse_zone_spec, parse_target_text
 from ..cameras import CameraManager
 from ..actuators import ActuatorManager
-from ..detectors import create_pipeline_from_config
+from ..detectors import create_pipeline_from_config, ProcessedFrame
 
 
 # ============================================================================
@@ -29,9 +44,24 @@ from ..detectors import create_pipeline_from_config
 # ============================================================================
 
 class TelegramClient:
-    """Telegram Bot API client with retry logic and rate limiting."""
+    """Telegram Bot API client with retry logic and rate limiting.
+    
+    Handles:
+    - Rate limiting (20 calls/sec max via _min_interval)
+    - Automatic retry with exponential backoff
+    - Special handling for getUpdates long-poll (timeout > poll timeout)
+    - 429 rate limit handling (honors Retry-After header)
+    - Multipart file upload for photos
+    
+    Thread-safe: rate limiting uses simple timestamp check.
+    """
     
     def __init__(self, config: TelegramConfig):
+        """Initialize client with bot token.
+        
+        Args:
+            config: TelegramConfig with token and chat_id
+        """
         self.config = config
         self.api_url = f"https://api.telegram.org/bot{config.token}"
         self.session = requests.Session()
@@ -39,13 +69,26 @@ class TelegramClient:
         self._min_interval = 0.05  # 20 calls/sec max
     
     def _rate_limit(self):
-        """Enforce minimum interval between calls."""
+        """Enforce minimum interval between API calls.
+        
+        Simple sleep-based rate limiter. Not token-bucket but sufficient
+        for our low-volume bot (few calls per second max).
+        """
         elapsed = time.time() - self._last_call
         if elapsed < self._min_interval:
             time.sleep(self._min_interval - elapsed)
     
     def call(self, method: str, max_retries: int = 3, **kwargs) -> Optional[Dict]:
-        """Call Telegram API method with retry logic."""
+        """Call Telegram API method with retry logic.
+        
+        Args:
+            method: API method name (e.g., "sendMessage", "getUpdates")
+            max_retries: Maximum retry attempts
+            **kwargs: Method parameters
+            
+        Returns:
+            API result dict or None on failure
+        """
         self._rate_limit()
 
         # getUpdates long-poll: requests timeout must EXCEED the poll timeout,
@@ -81,7 +124,7 @@ class TelegramClient:
                     continue
                 else:
                     print(f"  TG {method} HTTP {r.status_code}: {r.text}")
-                    
+                   
             except requests.Timeout:
                 print(f"  TG {method} timeout (attempt {attempt + 1})")
             except Exception as e:
@@ -89,11 +132,13 @@ class TelegramClient:
             
             if attempt < max_retries - 1:
                 time.sleep(1 * (attempt + 1))  # Exponential backoff
-        
+       
         return None
     
-    # Convenience methods
+    # Convenience methods for common API calls
+    
     def send_message(self, chat_id: int, text: str, reply_markup: str = None, parse_mode: str = "HTML") -> Optional[Dict]:
+        """Send text message."""
         data = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
         if reply_markup:
             data["reply_markup"] = reply_markup
@@ -101,6 +146,7 @@ class TelegramClient:
     
     def send_photo(self, chat_id: int, photo_bytes: bytes, caption: str = "", 
                    reply_markup: str = None, parse_mode: str = "HTML") -> Optional[Dict]:
+        """Send photo with optional caption and inline keyboard."""
         files = {"photo": ("frame.jpg", photo_bytes, "image/jpeg")}
         data = {"chat_id": chat_id, "caption": caption, "parse_mode": parse_mode}
         if reply_markup:
@@ -109,12 +155,16 @@ class TelegramClient:
     
     def edit_message_text(self, chat_id: int, message_id: int, text: str, 
                           parse_mode: str = "HTML") -> Optional[Dict]:
+        """Edit text of existing message."""
         return self.call("editMessageText", chat_id=chat_id, message_id=message_id, 
                         text=text, parse_mode=parse_mode)
     
     def edit_message_media(self, chat_id: int, message_id: int, photo_bytes: bytes, 
                            caption: str = "", parse_mode: str = "HTML") -> Optional[Dict]:
-        # media = JSON string (form field) referencing attach://photo (actual file)
+        """Edit media (photo) of existing message.
+        
+        Uses attach://photo protocol: media JSON references the file via attach://.
+        """
         media = json.dumps({"type": "photo", "media": "attach://photo", 
                             "caption": caption, "parse_mode": parse_mode})
         files = {"photo": ("frame.jpg", photo_bytes, "image/jpeg")}
@@ -122,22 +172,30 @@ class TelegramClient:
                          chat_id=chat_id, message_id=message_id, media=media)
     
     def delete_message(self, chat_id: int, message_id: int) -> bool:
+        """Delete message. Returns True on success."""
         result = self.call("deleteMessage", chat_id=chat_id, message_id=message_id)
         return result is not None
     
     def answer_callback_query(self, callback_query_id: str, text: str) -> bool:
+        """Answer callback query (inline button press)."""
         result = self.call("answerCallbackQuery", callback_query_id=callback_query_id, text=text)
         return result is not None
     
     def set_my_commands(self, commands: List[Dict], language_code: str) -> bool:
+        """Set bot commands menu for a language."""
         result = self.call("setMyCommands", commands=commands, language_code=language_code)
         return result is not None
     
     def delete_my_commands(self, language_code: str) -> bool:
+        """Delete bot commands menu for a language."""
         result = self.call("deleteMyCommands", language_code=language_code)
         return result is not None
     
     def get_updates(self, offset: int, timeout: int = 25) -> Optional[Dict]:
+        """Long-poll getUpdates.
+        
+        Returns dict with "result": list of updates (never None).
+        """
         result = self.call("getUpdates", offset=offset, timeout=timeout)
         if isinstance(result, list):
             return {"result": result}
@@ -150,7 +208,15 @@ class TelegramClient:
 
 @dataclass
 class CommandContext:
-    """Context passed to command handlers."""
+    """Context passed to command handlers.
+    
+    Attributes:
+        text: Full message text
+        args: Text after command prefix
+        message_id: Telegram message ID
+        chat_id: Chat ID
+        user_id: User ID
+    """
     text: str
     args: str
     message_id: int
@@ -159,7 +225,17 @@ class CommandContext:
 
 
 class CommandRouter:
-    """Routes commands to handlers based on text prefix."""
+    """Routes commands to handlers based on text prefix.
+    
+    Matching order:
+    1. Exact match (text == prefix)
+    2. Prefix + space (text.startswith(prefix + " "))
+    3. Prefix + @ (for bot mentions: /cmd@botname)
+    4. Prefix match (text.startswith(prefix))
+    5. Default handler
+    
+    Thread-unsafe: register() should be called before routing starts.
+    """
     
     def __init__(self):
         self.handlers: Dict[str, Callable[[CommandContext], None]] = {}
@@ -170,6 +246,7 @@ class CommandRouter:
         self.handlers[prefix.lower()] = handler
     
     def set_default(self, handler: Callable[[CommandContext], None]):
+        """Set default handler for unmatched commands."""
         self.default_handler = handler
     
     def route(self, ctx: CommandContext):
@@ -198,7 +275,21 @@ class CommandRouter:
 # ============================================================================
 
 class SuperGuardBot:
-    """Main bot application - wires all components together."""
+    """Main bot application - wires all components together.
+    
+    Responsibilities:
+    - Initialize all subsystems (cameras, detectors, actuators, alarms)
+    - Handle Telegram updates (poll loop + callbacks)
+    - Run detection loop (YOLO processing on all cameras)
+    - Manage per-camera settings persistence
+    - Publish status for desktop monitor (status.json + alarm_live.jpg)
+    - Localization (RU/EN/ES)
+    
+    Threading model:
+    - Main thread: detection_loop()
+    - Background thread: poll_loop() 
+    - Per-alarm threads: _update_loop(cam_id) - one per active camera
+    """
     
     def __init__(self, config: SuperGuardConfig):
         self.config = config
@@ -211,10 +302,12 @@ class SuperGuardBot:
         
         # Per-camera settings (loaded from disk)
         self.camera_settings: Dict[int, CameraSettings] = {}
+        
+        # Active camera (command target). Delegates to AlarmManager.
+        # Using property for backward compatibility with legacy code.
     
     @property
     def active_camera_id(self) -> int:
-        """Active camera (command target). Delegates to AlarmManager."""
         return self.alarm.active_camera_id
 
     @active_camera_id.setter
@@ -235,7 +328,11 @@ class SuperGuardBot:
         os.makedirs(self.frame_dir, exist_ok=True)
     
     def _load_i18n(self):
-        """Load translation dictionaries."""
+        """Load translation dictionaries for RU/EN/ES.
+        
+        Contains all user-facing strings. Uses simple key-value dict per language.
+        tr() method handles formatting with **kw.
+        """
         # Import from existing panic_mode or define here
         # For brevity, using minimal set - full dict in i18n.py
         self.L = {
@@ -404,7 +501,18 @@ class SuperGuardBot:
         }
     
     def tr(self, key: str, **kw) -> str:
-        """Translate key into current language."""
+        """Translate key into current language.
+        
+        Falls back to Russian if key missing in current language.
+        Formats string with **kw if provided.
+        
+        Args:
+            key: Translation key
+            **kw: Format arguments
+            
+        Returns:
+            Translated and formatted string
+        """
         txt = self.L[self.lang].get(key) or self.L["ru"].get(key, key)
         if kw:
             try:
@@ -427,12 +535,24 @@ class SuperGuardBot:
     # ----- Command Handlers -----
     
     def cmd_autoguard(self, ctx: CommandContext):
+        """Toggle global auto mode."""
         self.toggle_auto()
     
     def cmd_togglealarm(self, ctx: CommandContext):
+        """Toggle alarm for active camera (or cancel if active).
+        
+        Behavior:
+        - If alarm active on any camera: cancel last active camera's alarm (manual cancel restores auto_mode)
+        - If no alarm: trigger manual alarm on active camera (forces manual mode for this alarm)
+        """
         self.toggle_alarm()
     
     def cmd_zone(self, ctx: CommandContext):
+        """Set search zone for active camera.
+        
+        Args:
+            ctx.args: Zone spec (e.g., "N3x4 C9") or "off"/help
+        """
         arg = ctx.args.strip()
         if not arg or arg.lower() in ("?", "help", "справка", "ayuda"):
             self.tg.send_message(ctx.chat_id, f"📍 {self.tr('zone_search')}: {self.zone_label()}\n\n{self.tr('zone_help')}")
@@ -450,6 +570,11 @@ class SuperGuardBot:
         self.set_zone(zone)
     
     def cmd_target(self, ctx: CommandContext):
+        """Set search target for active camera.
+        
+        Args:
+            ctx.args: Free text target (e.g., "red car", "person")
+        """
         arg = ctx.args.strip()
         if not arg or arg.lower() in ("?", "help", "справка", "ayuda"):
             self.tg.send_message(ctx.chat_id, f"🔍 {self.tr('target_current')}: {self.target_label()}\n{self.tr('target_hint')}")
@@ -458,6 +583,11 @@ class SuperGuardBot:
         self.set_target(arg)
     
     def cmd_cam(self, ctx: CommandContext):
+        """Switch active camera or show camera list/status.
+        
+        Args:
+            ctx.args: Camera number (1-8), "list", "status", or help
+        """
         arg = ctx.args.strip()
         if not arg or arg.lower() in ("?", "list", "список", "lista"):
             lines = []
@@ -522,7 +652,11 @@ class SuperGuardBot:
         self.set_active_camera_plugs(plug_names)
     
     def set_active_camera_plugs(self, plug_names: List[str]):
-        """Bind a list of plugs to the active camera and persist the binding."""
+        """Bind a list of plugs to the active camera and persist the binding.
+        
+        Args:
+            plug_names: List of actuator names (e.g., ["plug1", "plug2"])
+        """
         available = [p["name"] for p in self.actuator_manager.list_all()]
         unknown = [n for n in plug_names if n not in available]
         if unknown:
@@ -531,7 +665,7 @@ class SuperGuardBot:
             return
         
         cam_id = self.active_camera_id
-        self.actuator_manager.set_camera_bindings(cam_id, plug_names)
+        self.actuator_manager.set_camera_binding(cam_id, plug_names)
         
         # Persist in camera settings
         settings = self.get_camera_settings(cam_id)
@@ -544,6 +678,7 @@ class SuperGuardBot:
                              f"✅ Камера {cam_id} ({cam_name}) → розетки: {plugs_str}")
     
     def cmd_setlocal(self, ctx: CommandContext):
+        """Show language selection inline keyboard."""
         keyboard = json.dumps({"inline_keyboard": [[
             {"text": "🇬🇧 EN", "callback_data": "set_lang:en"},
             {"text": "🇪🇸 ES", "callback_data": "set_lang:es"},
@@ -551,12 +686,19 @@ class SuperGuardBot:
         self.tg.send_message(ctx.chat_id, self.tr("lang_title"), reply_markup=keyboard)
     
     def cmd_default(self, ctx: CommandContext):
-        # Delete non-command messages to keep chat clean
+        """Default handler: delete non-command messages to keep chat clean."""
         self.tg.delete_message(ctx.chat_id, ctx.message_id)
     
     # ----- Callback Handlers -----
     
     def handle_callback(self, callback_query: Dict):
+        """Handle inline button callbacks.
+        
+        Supported callbacks:
+        - set_lang:<code> - change interface language
+        - cancel_alarm - cancel active alarm
+        - auto_toggle - toggle auto mode
+        """
         data = callback_query.get("data")
         cb_id = callback_query["id"]
         
@@ -574,6 +716,7 @@ class SuperGuardBot:
     # ----- Core Logic -----
     
     def set_language(self, code: str):
+        """Change interface language and persist."""
         if code not in self.L:
             return
         self.lang = code
@@ -583,6 +726,7 @@ class SuperGuardBot:
         self.tg.send_message(self.config.telegram.chat_id, self.tr("lang_set", lang=code))
     
     def toggle_auto(self):
+        """Toggle global auto mode and persist."""
         self.alarm.auto_mode = not self.alarm.auto_mode
         self.save_settings()
         self.refresh_control_msg()
@@ -593,6 +737,11 @@ class SuperGuardBot:
                                 self.tr("auto_on_detail", n=self.config.detection.auto_resolve_frames))
     
     def toggle_alarm(self):
+        """Toggle alarm: cancel if active, trigger if inactive.
+        
+        If any camera has active alarm -> cancel last active (manual cancel restores global auto_mode).
+        If no alarms -> trigger manual alarm on active camera (forces manual mode for this alarm).
+        """
         cams = self.alarm.active_cameras()
         if cams:
             # Manual cancel: cancel the last active camera alarm (restores auto mode)
@@ -612,12 +761,16 @@ class SuperGuardBot:
     
     def cancel_alarm(self, cam_id: Optional[int] = None, note: str = ""):
         """Cancel alarm for a specific camera (or the last active one).
-
+        
         New protocol:
-        - the FIRST frame is restored into the alarm message (audit)
+        - the FIRST frame is restored into the alarm message (audit trail)
         - frame pool is cleared
         - manual cancel restores the global auto mode saved at manual trigger
         - the camera stays ACTIVE (for /cam commands) until another takes over
+        
+        Args:
+            cam_id: Camera ID to cancel (None = last active)
+            note: Optional message to send after cancel
         """
         if cam_id is None:
             cams = self.alarm.active_cameras()
@@ -664,6 +817,7 @@ class SuperGuardBot:
         self.refresh_control_msg()
     
     def set_zone(self, zone: Optional[Zone]):
+        """Set zone for active camera and persist."""
         settings = self.get_active_settings()
         settings.zone = zone
         self.save_camera_settings()
@@ -673,6 +827,7 @@ class SuperGuardBot:
                             else f"📍 {self.tr('zone_off')}")
     
     def set_target(self, text: str):
+        """Set target for active camera and persist."""
         target = parse_target_text(text)
         settings = self.get_active_settings()
         settings.target = target
@@ -687,6 +842,11 @@ class SuperGuardBot:
                                 f"🔍 {self.tr('target_set')}: {text}\n🔍 {self.tr('target_filter')}: {target.filter_label()}")
     
     def switch_camera(self, cam_id: int):
+        """Switch active camera.
+        
+        Manual camera switch: alarms per-camera stay as they are;
+        only the "active camera" (command target) changes.
+        """
         # Manual camera switch: alarms per-camera stay as they are;
         # only the "active camera" (command target) changes.
         self.alarm.active_camera_id = cam_id
@@ -702,6 +862,7 @@ class SuperGuardBot:
         self.tg.send_message(self.config.telegram.chat_id, f"Камера переключена: {name}")
     
     def list_plugs(self):
+        """Show plugs bound to active camera and all available plugs."""
         plugs = self.actuator_manager.list_all()
         cam_id = self.active_camera_id
         active_bindings = self.actuator_manager.camera_bindings.get(cam_id, [])
@@ -718,6 +879,7 @@ class SuperGuardBot:
         self.tg.send_message(self.config.telegram.chat_id, "\n".join(lines))
     
     def test_plugs(self):
+        """Test all plugs (health check) and report results."""
         results = self.actuator_manager.test_all()
         lines = ["🔌 Тестирование розеток..."]
         for r in results:
@@ -731,13 +893,19 @@ class SuperGuardBot:
     def trigger_alarm(self, desc: str, frame: np.ndarray, cam_id: Optional[int] = None,
                       manual: bool = False):
         """Trigger alarm for a specific camera (concurrent with other cameras).
-
+        
         New protocol:
         - ONE alarm message per camera: trigger frame sent, then the SAME message
           is updated every update_every s with frames from the temp frame pool.
         - manual=True forces manual mode for this alarm; manual cancel restores
           the global auto mode.
         - camera stays ACTIVE until another camera triggers (auto or manual).
+        
+        Args:
+            desc: Description for caption (e.g., "TARGET DETECTED")
+            frame: Annotated frame (with YOLO boxes) to send as trigger
+            cam_id: Camera ID (None = active_camera_id)
+            manual: If True, this alarm is manual (auto_mode=False for this alarm)
         """
         cam_id = cam_id or self.alarm.active_camera_id
         state = self.alarm.get(cam_id)
@@ -750,11 +918,10 @@ class SuperGuardBot:
 
         # The triggering camera BECOMES the active camera and stays active
         # until another camera becomes active (via alarm or /cam command).
-        # Always sync camera_manager.active_id with the triggering camera.
-        self.alarm.active_camera_id = cam_id
-        self.active_camera_id = cam_id
-        self.camera_manager.set_active(cam_id)
-        self.load_camera_settings()
+        if self.alarm.active_camera_id != cam_id:
+            self.alarm.active_camera_id = cam_id
+            self.camera_manager.set_active(cam_id)
+            self.load_camera_settings()
 
         # Turn on actuators for the triggering camera
         self.set_actuators(True, cam_id)
@@ -778,7 +945,12 @@ class SuperGuardBot:
                    f"📷 {self.tr('camera')}: {cam_name}\n\n"
                    f"📷 {self.tr('trigger_frame')}")
 
-        res = self.tg.send_photo(self.config.telegram.chat_id, frame_bytes, caption)
+        # Inline keyboard with "Turn off alarm" button
+        reply_markup = json.dumps({"inline_keyboard": [[
+            {"text": "🚨 Отключить тревогу", "callback_data": "cancel_alarm"}
+        ]]})
+
+        res = self.tg.send_photo(self.config.telegram.chat_id, frame_bytes, caption, reply_markup=reply_markup)
         if not res:
             self.cancel_alarm(cam_id=cam_id)
             return
@@ -797,12 +969,11 @@ class SuperGuardBot:
 
     def _update_loop(self, cam_id: int):
         """Per-camera: update the alarm message every update_every s with the
-        LATEST NEW frame from the camera while THIS camera's alarm is active.
+        latest frame from the temp pool while THIS camera's alarm is active.
         
-        Only updates if frame timestamp/hash changed since last update.
-        Frame pool stores recent frames for potential manual review."""
+        Runs in background thread per active camera. Exits when alarm deactivates.
+        """
         state = self.alarm.get(cam_id)
-        last_sent_hash = None
         while True:
             time.sleep(self.config.detection.update_every)
             if not state.is_active:
@@ -816,19 +987,11 @@ class SuperGuardBot:
             if not cam:
                 continue
 
-            # Get frame with metadata to check if it's actually NEW
-            frame_meta = cam.latest_with_meta
-            if frame_meta is None or frame_meta.image is None:
+            frame = cam.latest
+            if frame is None:
                 continue
 
-            frame = frame_meta.image
-            frame_hash = frame_meta.hash
-
-            # Skip if same frame as last sent (camera hasn't produced new frame)
-            if last_sent_hash is not None and frame_hash == last_sent_hash:
-                continue
-
-            # This is a NEW frame - push to pool and send
+            # Push into temp pool (bounded), update message with newest frame
             state.frame_pool.append(frame)
             if len(state.frame_pool) > 60:
                 state.frame_pool.pop(0)
@@ -843,11 +1006,21 @@ class SuperGuardBot:
                     self.save_local(buf.tobytes())
                     # Desktop bridge: keep alarm frame fresh
                     self.write_alarm_frame(frame)
-                    last_sent_hash = frame_hash
             except Exception as e:
                 print(f"  Live frame update error: {e}")
     
     def set_actuators(self, on: bool, cam_id: int):
+        """Turn ON/OFF all actuators bound to a camera.
+        
+        Called by SuperGuardBot on alarm trigger (True) and cancel (False).
+        
+        Args:
+            on: True = ON, False = OFF
+            cam_id: Camera ID to control actuators for
+            
+        Returns:
+            True if any actuator succeeded
+        """
         actuators = self.actuator_manager.get_for_camera(cam_id)
         if not actuators:
             print(f"  PLUG {'ON' if on else 'OFF'} FAILED: No actuators for cam={cam_id}")
@@ -868,15 +1041,22 @@ class SuperGuardBot:
     # ----- Settings Persistence -----
     
     def get_active_settings(self) -> CameraSettings:
+        """Get settings for currently active camera."""
         return self.get_camera_settings(self.active_camera_id)
     
     def get_camera_settings(self, cam_id: int) -> CameraSettings:
+        """Get (lazily create) settings for a camera."""
         if cam_id not in self.camera_settings:
             self.camera_settings[cam_id] = CameraSettings()
         return self.camera_settings[cam_id]
     
     def load_camera_settings(self):
-        """Load settings for active camera from persisted data."""
+        """Load settings for active camera from persisted data.
+        
+        Note: Actual loading happens in load_settings() which restores
+        all camera_settings from JSON. This method is a placeholder
+        for future per-camera lazy loading.
+        """
         settings = self.get_active_settings()
         if settings.zone:
             # Zone already loaded from disk
@@ -886,7 +1066,11 @@ class SuperGuardBot:
             pass
     
     def save_camera_settings(self):
-        """Save active camera settings to disk."""
+        """Save active camera settings to disk (legacy settings file).
+        
+        Format: {"camera_settings": {cam_id: {...}}, "active_camera": N, "lang": "ru"}
+        Atomic write via tmp + os.replace.
+        """
         import os, json
         data = {"camera_settings": {}, "active_camera": self.active_camera_id, "lang": self.lang}
         
@@ -933,7 +1117,7 @@ class SuperGuardBot:
                 self.camera_settings[cam_id] = settings
                 # Apply persisted plug bindings to the actuator manager
                 if settings.actuator:
-                    self.actuator_manager.set_camera_bindings(cam_id, settings.actuator)
+                    self.actuator_manager.set_camera_binding(cam_id, settings.actuator)
             
             print(f"Settings loaded: cam={self.active_camera_id} lang={self.lang} auto={self.alarm.auto_mode}")
         except Exception as e:
@@ -941,28 +1125,22 @@ class SuperGuardBot:
     
     # ----- Helpers -----
     
-    def tr(self, key: str, **kw) -> str:
-        txt = self.L[self.lang].get(key) or self.L["ru"].get(key, key)
-        if kw:
-            try:
-                txt = txt.format(**kw)
-            except (KeyError, IndexError):
-                pass
-        return txt
-    
     def zone_label(self) -> str:
+        """Human-readable zone label for active camera."""
         settings = self.get_active_settings()
         if settings.zone is None:
             return self.tr("whole_frame")
         return str(settings.zone) + f" ({self.tr('row_col', r=settings.zone.row, c=settings.zone.col)})"
     
     def target_label(self) -> str:
+        """Human-readable target label for active camera."""
         settings = self.get_active_settings()
         if settings.target and settings.target.description:
             return settings.target.description
         return self.tr("target_not_set")
     
     def refresh_control_msg(self):
+        """Update the persistent control message (mode/status display)."""
         if self.alarm.control_msg_id:
             self.tg.edit_message_text(
                 self.config.telegram.chat_id,
@@ -971,6 +1149,7 @@ class SuperGuardBot:
             )
     
     def control_text(self) -> str:
+        """Generate control message text with current state."""
         mode = self.tr("mode_auto") if self.alarm.auto_mode else self.tr("mode_manual")
         cam_name = self.config.cameras.get(self.active_camera_id, CameraConfig(cam_id=self.active_camera_id, name=f"Camera {self.active_camera_id}", url="")).name
         plugs = self.actuator_manager.camera_bindings.get(self.active_camera_id, [])
@@ -984,6 +1163,7 @@ class SuperGuardBot:
                 f"💡 {self.tr('control_hint')}")
     
     def set_bot_menu(self):
+        """Set bot commands menu for all supported languages."""
         cmds = [
             {"command": "autoguard", "description": self.tr("menu_autoguard")},
             {"command": "togglealarm", "description": self.tr("menu_togglealarm")},
@@ -998,6 +1178,7 @@ class SuperGuardBot:
             self.tg.set_my_commands(cmds, lc)
     
     def save_local(self, frame_bytes: bytes):
+        """Save frame locally to frame_dir with timestamp + hash filename."""
         ts = time.strftime("%Y%m%d_%H%M%S")
         import hashlib, os
         path = os.path.join(self.frame_dir, f"panic_{ts}_{hashlib.md5(frame_bytes).hexdigest()[:6]}.jpg")
@@ -1014,7 +1195,13 @@ class SuperGuardBot:
         return d
     
     def write_status(self, alarm_active: bool = None):
-        """Write runtime state for the desktop monitor (atomic)."""
+        """Write runtime state for the desktop monitor (atomic).
+        
+        Published to desktop_state/status.json watched by desktop UI.
+        
+        Args:
+            alarm_active: Override alarm status (None = compute from AlarmManager)
+        """
         import os, json
         d = self._state_dir()
         settings = self.get_active_settings()
@@ -1041,7 +1228,10 @@ class SuperGuardBot:
             print(f"  status write error: {e}")
     
     def write_alarm_frame(self, frame):
-        """Write the latest alarm frame for the desktop fullscreen window."""
+        """Write the latest alarm frame for the desktop fullscreen window.
+        
+        Published to desktop_state/alarm_live.jpg watched by desktop UI.
+        """
         import os
         try:
             ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
@@ -1055,6 +1245,11 @@ class SuperGuardBot:
     # ----- Poll Loop -----
     
     def poll_loop(self):
+        """Long-poll Telegram updates in background thread.
+        
+        Runs continuously, dispatching updates to handle_update().
+        Handles network errors with backoff.
+        """
         offset = 0
         while True:
             try:
@@ -1074,6 +1269,7 @@ class SuperGuardBot:
                 time.sleep(2)
     
     def handle_update(self, upd: Dict):
+        """Dispatch update to callback or command handler."""
         if "callback_query" in upd:
             self.handle_callback(upd["callback_query"])
         elif "message" in upd:
@@ -1098,11 +1294,33 @@ class SuperGuardBot:
     # ----- Detection Loop -----
     
     def detection_loop(self):
-        """Monitor ALL cameras simultaneously with per-camera settings."""
-        from ..detectors import create_pipeline_from_config
+        """Monitor ALL cameras simultaneously with per-camera settings.
+        
+        YOLO processes frames -> annotates with boxes -> stores annotated frames.
+        Bot consumes annotated frames for live updates and alarm triggers.
+        
+        Runs in main thread. Sleeps detect_every between cycles.
+        
+        Key data structures:
+        - streak[cam_id]: consecutive frames with matches (trigger threshold)
+        - clean[cam_id]: consecutive frames without matches (auto-resolve threshold)
+        - annotated_frames[cam_id]: latest ProcessedFrame per camera (for live updates)
+        
+        Alarm triggering:
+        - If streak >= require_frames AND camera not already in alarm -> trigger
+        - Uses ANNOTATED frame (with YOLO boxes) for trigger
+        - Resets streak to 0 to prevent re-trigger spam
+        
+        Auto-resolve:
+        - Per camera: if auto_mode AND clean >= auto_resolve_frames -> cancel
+        """
+        from ..detectors import create_pipeline_from_config, ProcessedFrame
         
         streak = {cid: 0 for cid in range(1, 9)}
         clean = {cid: 0 for cid in range(1, 9)}
+        
+        # Per-camera annotated frame store for live updates
+        annotated_frames: Dict[int, ProcessedFrame] = {}
         
         while True:
             time.sleep(self.config.detection.detect_every)
@@ -1112,7 +1330,11 @@ class SuperGuardBot:
                 if not cam or not cam.alive:
                     continue
                 
-                frame = cam.latest
+                # Use downscaled frame for YOLO on 4K cameras (Camera 2)
+                if cam_id == 2 and hasattr(cam, 'get_downscaled_frame'):
+                    frame = cam.get_downscaled_frame(max_width=1280)
+                else:
+                    frame = cam.latest
                 if frame is None:
                     continue
                 
@@ -1123,7 +1345,14 @@ class SuperGuardBot:
                 
                 # Create pipeline for this camera
                 pipeline = create_pipeline_from_config(self.config, target, zone)
-                matches, all_dets = pipeline.process(frame, zone)
+                processed = pipeline.process(frame, zone)
+                processed.camera_id = cam_id
+                
+                # Store annotated frame for this camera (bot will consume)
+                annotated_frames[cam_id] = processed
+                
+                matches = processed.matches
+                all_dets = processed.all_detections
                 
                 if len(matches) >= self.config.detection.min_yellow_vehicles:
                     streak[cam_id] += 1
@@ -1141,11 +1370,12 @@ class SuperGuardBot:
                 print(status, flush=True)
                 
                 # Trigger alarm for THIS camera (concurrent, no global lock)
+                # Use ANNOTATED frame for alarm trigger
                 if streak[cam_id] >= self.config.detection.require_frames and not self.alarm.is_cam_active(cam_id):
                     m = matches[0]
-                    desc = (f"{self.tr('yellow_found')}\n"
+                    desc = (f"{self.tr('yellow_found')}"
                             f"({m.name} conf={m.confidence:.2f}, color={m.color_fraction*100:.0f}%)")
-                    self.trigger_alarm(desc, frame, cam_id=cam_id)
+                    self.trigger_alarm(desc, processed.annotated, cam_id=cam_id)
                     streak[cam_id] = 0  # prevent re-trigger spam while active
             
             # Auto-resolve per camera: each alarm resolves independently
@@ -1153,6 +1383,12 @@ class SuperGuardBot:
                 state = self.alarm.get(alarm_cam)
                 if state.auto_mode and clean.get(alarm_cam, 0) >= self.config.detection.auto_resolve_frames:
                     self.cancel_alarm(cam_id=alarm_cam, note=self.tr("threat_gone"))
+            
+            # Periodic status update for heartbeat/watchdog
+            self.write_status()
+        
+        # Store reference for bot to access annotated frames
+        self._annotated_frames = annotated_frames
 
 
 # ============================================================================
@@ -1161,9 +1397,11 @@ class SuperGuardBot:
 
 def main():
     import sys
+    import os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    from ..config import load_config
     config = load_config(base_dir)
     
     # Kill other instances
@@ -1174,7 +1412,7 @@ def main():
     bot.set_bot_menu()
     
     # Start poll loop in background
-    threading.Thread(target=bots.poll_loop, daemon=True).start()
+    threading.Thread(target=bot.poll_loop, daemon=True).start()
     
     # Start detection loop
     bot.detection_loop()
