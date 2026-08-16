@@ -9,7 +9,7 @@ import os
 import time
 import traceback
 
-BASE = r"C:\SuperGuard"
+BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, BASE)
 
 PASS = 0
@@ -64,7 +64,7 @@ check("все импорты", test_imports)
 print("\n[3] Конфигурация")
 def test_config():
     from superguard.config import load_config
-    c = load_config(BASE + r"\superguard")
+    c = load_config(os.path.join(BASE, "superguard"))
     assert c.telegram.token, "нет токена"
     assert len(c.cameras) >= 8, f"мало камер: {len(c.cameras)}"
     assert 2 in c.cameras, "нет камеры 2"
@@ -105,7 +105,7 @@ print("\n[5] Хранилище")
 def test_storage():
     from superguard.config import load_config
     from superguard.storage import SettingsStore
-    c = load_config(BASE + r"\superguard")
+    c = load_config(os.path.join(BASE, "superguard"))
     store = SettingsStore(c)
     s = store.load()
     assert isinstance(s, dict)
@@ -124,14 +124,14 @@ def test_detector():
     from superguard.config import load_config
     from superguard.models import Target
     from superguard.detectors import create_pipeline_from_config
-    c = load_config(BASE + r"\superguard")
+    c = load_config(os.path.join(BASE, "superguard"))
     pipeline = create_pipeline_from_config(c, Target(), None)
     assert pipeline.detector is not None
     print(f"    pipeline: {type(pipeline.detector).__name__}")
 check("create_pipeline_from_config", test_detector)
 
 # --- 7. Камеры (реальное подключение cam2) ---
-print("\\n[7] Камера 2 (Revotech RTSP)")
+print("\n[7] Камера 2 (Revotech RTSP)")
 def test_camera2():
     # SKIP: Camera 2 disabled (need cable)
     print("    SKIP: Camera 2 disabled (need cable)")
@@ -143,7 +143,7 @@ print("\n[8] Камера 1 (HLS Indonesia)")
 def test_camera1():
     from superguard.config import load_config
     from superguard.cameras import create_camera
-    c = load_config(BASE + r"\superguard")
+    c = load_config(os.path.join(BASE, "superguard"))
     cam = create_camera(c.cameras[1], c.detection.update_every)
     cam.start()
     time.sleep(5)
@@ -161,7 +161,7 @@ print("\n[9] Актуаторы")
 def test_actuators():
     from superguard.config import load_config
     from superguard.actuators import ActuatorManager
-    c = load_config(BASE + r"\superguard")
+    c = load_config(os.path.join(BASE, "superguard"))
     am = ActuatorManager(c)
     assert "plug1" in am.actuators, "нет plug1"
     assert "plug2" in am.actuators, "нет plug2"
@@ -177,7 +177,7 @@ print("\n[10] Telegram-клиент")
 def test_telegram():
     from superguard.config import load_config
     from superguard.telegram import TelegramClient
-    c = load_config(BASE + r"\superguard")
+    c = load_config(os.path.join(BASE, "superguard"))
     tg = TelegramClient(c.telegram)
     assert tg.api_url, "нет api_url"
     assert "api.telegram.org" in tg.api_url, f"странный url: {tg.api_url}"
@@ -189,15 +189,15 @@ print("\n[11] Главное приложение")
 def test_app():
     from superguard.config import load_config
     from superguard.main import SuperGuardApplication
-    c = load_config(BASE + r"\superguard")
+    c = load_config(os.path.join(BASE, "superguard"))
     app = SuperGuardApplication(c)
     app.initialize()
     assert app.bot is not None, "бот не создан"
     assert len(app.bot.camera_manager.cameras) >= 8
     assert len(app.bot.actuator_manager.actuators) >= 2
-    # Проверка маппинга камеры 2
+    # Проверка маппинга камеры 2 - используем дефолтный конфиг (до загрузки настроек)
     cam2_acts = app.bot.actuator_manager.get_for_camera(2)
-    assert len(cam2_acts) == 1 and cam2_acts[0].name == "plug1"
+    assert len(cam2_acts) == 2 and "plug1" in [a.name for a in cam2_acts] and "plug2" in [a.name for a in cam2_acts], f"cam2 actuators: {[a.name for a in cam2_acts]}"
     app.bot.camera_manager.stop_all()
     print(f"    камер: {len(app.bot.camera_manager.cameras)}, розеток: {len(app.bot.actuator_manager.actuators)}")
 check("SuperGuardApplication init", test_app)

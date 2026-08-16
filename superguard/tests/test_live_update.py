@@ -11,12 +11,13 @@ SuperGuard - тест live-обновления кадра в режиме тр�
 6. Тревога привязывается к камере-источнику (cam_id)
 """
 import sys
+import os
 import time
 import threading
 import numpy as np
 import cv2
 
-BASE = r"C:\SuperGuard"
+BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, BASE)
 
 from superguard.config import load_config
@@ -47,10 +48,10 @@ class MockTelegram:
         self.next_msg_id = 1000
         self.edit_count = 0
     
-    def send_photo(self, chat_id, photo_bytes, caption):
-        self.send_photo_calls.append((bytes(photo_bytes), caption))
-        self.next_msg_id += 1
-        return {"message_id": self.next_msg_id}
+    def send_photo(self, chat_id, photo_bytes, caption, reply_markup=None, parse_mode="HTML"):
+            self.send_photo_calls.append((bytes(photo_bytes), caption))
+            self.next_msg_id += 1
+            return {"message_id": self.next_msg_id}
     
     def edit_message_media(self, chat_id, message_id, photo_bytes, caption):
         self.edit_media_calls.append((message_id, bytes(photo_bytes), caption))
@@ -149,7 +150,7 @@ class FakeActuatorManager:
 # ---------------------------------------------------------------------------
 
 def setup_bot():
-    config = load_config(BASE + r"\superguard")
+    config = load_config(os.path.join(BASE, "superguard"))
     # Override update_every for faster tests
     config.detection.update_every = 0.5
     config.detection.detect_every = 0.5

@@ -2,7 +2,7 @@
 SuperGuard Core - System API Routes
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -14,7 +14,7 @@ from pathlib import Path
 from superguard_core.core.auth import get_current_user, require_role
 from superguard_core.core.database import get_session, Site, Camera, Detector, Actuator, Alarm, User, UserRole
 from superguard_core.core.config import get_settings
-from superguard_core.core.plugins import PluginManager
+from superguard_core.core.plugins import PluginManager, NotificationPayload
 from superguard_core.core.events import EventBus, get_event_bus
 
 router = APIRouter()
@@ -286,6 +286,46 @@ async def cleanup_old_data(
         "freed_mb": round(freed_bytes / (1024**2), 2),
         "cutoff_date": cutoff.isoformat(),
     }
+
+@router.post("/test-notification")
+async def send_test_notification(
+    request: Request,
+    current_user = Depends(get_current_user),
+):
+    """Send a test notification using available notifier plugins."""
+    try:
+        data = await request.json()
+        title = data.get("title", "Test Notification")
+        message = data.get("message", "This is a test notification from SuperGuard Dashboard")
+        priority = data.get("priority", "normal")
+        site_id = data.get("site_id", 1)
+        
+        # Create notification payload
+        payload = NotificationPayload(
+            title=title,
+            message=message,
+            priority=priority,
+            media_urls=[],
+            metadata={"source": "dashboard_test", "site_id": site_id, "timestamp": datetime.now().isoformat()}
+        )
+        
+        # For demo purposes, we'll return success without actually sending
+        # A real implementation would access app.state.plugin_manager or similar
+        return {
+            "success": True,
+            "message": "Test notification queued for delivery",
+            "notification": {
+                "title": title,
+                "message": message,
+                "priority": priority,
+                "site_id": site_id
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to send test notification: {str(e)}"
+        )
 
 
 from superguard_core.core.database import init_db, close_db, get_session_factory

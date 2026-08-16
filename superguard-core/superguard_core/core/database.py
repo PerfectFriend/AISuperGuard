@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     String, Text, Integer, Float, Boolean, DateTime, ForeignKey,
-    Enum as SQLEnum, JSON, Index, UniqueConstraint, func
+    Enum as SQLEnum, JSON, Index, UniqueConstraint, func, Table, Column
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.asyncio import (
@@ -243,7 +243,7 @@ class AlarmMedia(Base):
     path: Mapped[str] = mapped_column(String(512))
     thumbnail_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=func.now(), index=True)
-    metadata: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+    media_metadata: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
     file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     

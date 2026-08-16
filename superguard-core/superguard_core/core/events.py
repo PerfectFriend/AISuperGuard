@@ -218,6 +218,21 @@ async def publish_system_event(event_type: str, data: Dict[str, Any]):
     await bus.publish("system.events", data, event_type=event_type, source="system")
 
 
+async def publish_auth_event(bus: "EventBus", event_type: str, data: Dict[str, Any]):
+    """Publish auth-related system event."""
+    await bus.publish(Streams.SYSTEM_EVENTS, data, event_type=event_type, source="auth")
+
+
+async def publish_camera_frame_legacy(bus: "EventBus", camera_id: int, frame_data: Dict[str, Any]):
+    """Publish camera frame event (takes explicit bus)."""
+    await bus.publish(Streams.CAMERA_FRAMES, frame_data, event_type="frame", source=f"camera:{camera_id}")
+
+
+async def publish_detection_legacy(bus: "EventBus", camera_id: int, detection_data: Dict[str, Any]):
+    """Publish detection event (takes explicit bus)."""
+    await bus.publish(Streams.CAMERA_DETECTIONS, detection_data, event_type="detection", source=f"camera:{camera_id}")
+
+
 # Stream names constants
 class Streams:
     CAMERA_FRAMES = "camera.frames"

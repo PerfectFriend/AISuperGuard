@@ -28,6 +28,17 @@ async def lifespan(app: FastAPI):
     # Initialize database
     await init_db(settings.database_url)
     
+    # Get site ID for services that require it
+    from superguard_core.core.database import get_session_factory, Site
+    from sqlalchemy import select
+    site_id = 1  # default fallback
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(select(Site).where(Site.is_active == True).limit(1))
+        site = result.scalar_one_or_none()
+        if site:
+            site_id = site.id
+    
     # Initialize Redis event bus
     event_bus = await EventBus.create(settings.redis_url)
     app.state.event_bus = event_bus
@@ -44,10 +55,12 @@ async def lifespan(app: FastAPI):
     from superguard_core.services.actuator_engine import ActuatorEngine
     from superguard_core.services.recording_service import RecordingService
     
-    camera_manager = CameraManager(plugin_manager, event_bus)
-    detection_engine = DetectionEngine(plugin_manager, event_bus)
-    alarm_engine = AlarmEngine(event_bus)
-    actuator_engine = ActuatorEngine(plugin_manager, event_bus)
+    camera_manager = CameraManager(plugin_manager, event_bus, site_id)
+    detection_engine = DetectionEngine(plugin_manager, event_bus, site_id)
+    # For AlarmEngine we need actuator_engine instance, but we haven't created it yet.
+    # We'll create actuator_engine first, then alarm_engine.
+    actuator_engine = ActuatorEngine(plugin_manager, event_bus, site_id)
+    alarm_engine = AlarmEngine(event_bus, site_id, actuator_engine)
     recording_service = RecordingService(event_bus, settings.storage_path)
     
     app.state.camera_manager = camera_manager
@@ -74,8 +87,6 @@ async def lifespan(app: FastAPI):
     await plugin_manager.shutdown()
     await event_bus.close()
     await close_db()
-
-
 def create_app() -> FastAPI:
     """Create FastAPI application."""
     settings = get_settings()
@@ -112,7 +123,12 @@ def create_app() -> FastAPI:
     # Static files for media
     media_path = Path(settings.storage_path) / "media"
     media_path.mkdir(parents=True, exist_ok=True)
-    app.mount("/media", StaticFiles(directory=str(media_path)), name="media")
+    app.mount("/media", StaticFiles(directory=str(media_path)), name="media")\n# Static files for dashboard
+dashboard_path = Path(__file__).parent.parent / "dashboard"
+dashboard_path.mkdir(parents=True, exist_ok=True)
+app.mount("/dashboard", StaticFiles(directory=str(dashboard_path)), name="dashboard")
+
+
     
     @app.get("/health")
     async def health_check():

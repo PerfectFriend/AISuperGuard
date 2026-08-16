@@ -15,7 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from superguard_core.core.config import get_settings
-from superguard_core.core.database import Actuator, ActuatorState
+from superguard_core.core.database import Actuator
+from superguard_core.core.plugins import ActuatorState
 from superguard_core.core.events import EventBus, publish_actuator_command, publish_actuator_state, Streams
 from superguard_core.core.plugins import PluginManager, ActuatorPlugin, PluginConfig
 

@@ -10,12 +10,13 @@ SuperGuard - тест активной камеры и новой команды
 5. При тревоге с камеры включаются именно её привязанные розетки
 """
 import sys
+import os
 import time
 import json
 import numpy as np
 import cv2
 
-BASE = r"C:\SuperGuard"
+BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, BASE)
 
 from superguard.config import load_config
@@ -123,9 +124,9 @@ class FakeActuatorManager:
     def get_actuator(self, name):
         return MockActuator(name, self) if name in self.actuators else None
     
-    def set_camera_bindings(self, cam_id, names):
-        valid = [n for n in names if n in self.actuators]
-        self.camera_bindings[cam_id] = valid
+    def set_camera_binding(self, cam_id, names):
+            valid = [n for n in names if n in self.actuators]
+            self.camera_bindings[cam_id] = valid
     
     def list_all(self):
         result = []
@@ -155,7 +156,7 @@ class MockActuator:
         return True
 
 def make_bot():
-    config = load_config(BASE + r"\superguard")
+    config = load_config(os.path.join(BASE, "superguard"))
     bot = SuperGuardBot.__new__(SuperGuardBot)
     bot.config = config
     bot.tg = MockTelegram()
