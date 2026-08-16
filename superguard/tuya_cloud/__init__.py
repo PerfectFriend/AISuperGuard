@@ -142,16 +142,17 @@ class TuyaCloudClient:
 
 class TuyaCloudSync:
     """Background sync service for Tuya Cloud device discovery."""
-    
-    def __init__(self, config: SuperGuardConfig):
+
+    def __init__(self, config: SuperGuardConfig, actuator_manager=None):
         self.config = config
+        self.actuator_manager = actuator_manager
         self.client: Optional[TuyaCloudClient] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._last_sync = 0
         self._sync_interval = 300  # 5 minutes
-        
+
         if config.tuya_cloud.enabled:
             self.client = TuyaCloudClient(config.tuya_cloud)
             print(f"  [TuyaCloud] Initialized for region={config.tuya_cloud.region}")
@@ -269,28 +270,36 @@ class TuyaCloudSync:
             print(f"  [TuyaCloud] Env write error: {e}")
     
     def _reinitialize_actuator(self, plug_config: TuyaPlugConfig):
-        """Reinitialize actuator with new IP."""
-        try:
-            actuator_class = actuator_registry.get(plug_config.type)
-            if not actuator_class:
-                return
-            
-            # Create new config with updated IP
-            actuator_config = {
-                "name": plug_config.name,
-                "ip": plug_config.ip,
-                "device_id": plug_config.device_id,
-                "local_key": plug_config.local_key,
-                "version": plug_config.version,
-                "port": plug_config.port,
-            }
-            
-            # This would need access to the actuator manager to replace the instance
-            # For now, just log - the actuator manager should handle reinit on next use
-            print(f"  [TuyaCloud] Actuator {plug_config.name} needs reinit with IP {plug_config.ip}")
-            
-        except Exception as e:
-            print(f"  [TuyaCloud] Reinit error: {e}")
+            """Reinitialize actuator with new IP."""
+            try:
+                actuator_class = actuator_registry.get(plug_config.type)
+                if not actuator_class:
+                    return
+
+                # Create new config with updated IP
+                actuator_config = {
+                    "name": plug_config.name,
+                    "ip": plug_config.ip,
+                    "device_id": plug_config.device_id,
+                    "local_key": plug_config.local_key,
+                    "version": plug_config.version,
+                    "port": plug_config.port,
+                }
+
+                # If we have access to actuator_manager, replace the actuator instance
+                if self.actuator_manager:
+                    with self.actuator_manager._lock:
+                        # Remove old actuator and create new one
+                        if plug_config.name in self.actuator_manager._actuators:
+                            del self.actuator_manager._actuators[plug_config.name]
+                        new_actuator = actuator_class(actuator_config)
+                        self.actuator_manager._actuators[plug_config.name] = new_actuator
+                        print(f"  [TuyaCloud] Actuator {plug_config.name} REINITIALIZED with new IP {plug_config.ip}")
+                else:
+                    print(f"  [TuyaCloud] Actuator {plug_config.name} needs reinit with IP {plug_config.ip} (no actuator_manager ref)")
+
+            except Exception as e:
+                print(f"  [TuyaCloud] Reinit error: {e}")
     
     def force_sync(self) -> bool:
         """Force immediate sync (for testing or manual trigger)."""
@@ -298,11 +307,11 @@ class TuyaCloudSync:
 
 
 # Convenience function for integration
-def create_tuya_cloud_sync(config: SuperGuardConfig) -> Optional[TuyaCloudSync]:
+def create_tuya_cloud_sync(config: SuperGuardConfig, actuator_manager=None) -> Optional[TuyaCloudSync]:
     """Create and start TuyaCloudSync if configured."""
     if not config.tuya_cloud.enabled:
         return None
-    
-    sync = TuyaCloudSync(config)
+
+    sync = TuyaCloudSync(config, actuator_manager)
     sync.start()
     return sync

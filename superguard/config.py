@@ -16,6 +16,16 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Any
 
+from .logging_config import get_logger, setup_logging
+
+# Initialize structured logging
+logger = get_logger(__name__)
+setup_logging(
+    log_level=os.environ.get("SG_LOG_LEVEL", "INFO"),
+    log_file=os.environ.get("SG_LOG_FILE"),
+    json_format=os.environ.get("SG_LOG_JSON", "true").lower() == "true"
+)
+
 
 @dataclass
 class TelegramConfig:
@@ -198,20 +208,20 @@ def load_env_file(path: str) -> Dict[str, str]:
 
 def parse_actuator_configs(raw: str, defaults: Dict[str, Any]) -> List[TuyaPlugConfig]:
     """Parse SG_ACTUATORS JSON into TuyaPlugConfig list.
-    
+
     SG_ACTUATORS is a JSON array of objects, each with plug parameters.
     Falls back to single default plug if JSON is empty or invalid.
-    
+
     Args:
         raw: Raw JSON string from env
         defaults: Default values dict for missing fields
-        
+
     Returns:
         List of TuyaPlugConfig objects
     """
     if not raw.strip():
         return [TuyaPlugConfig(**defaults)]
-    
+
     try:
         data = json.loads(raw)
         plugs = []
@@ -234,7 +244,7 @@ def parse_actuator_configs(raw: str, defaults: Dict[str, Any]) -> List[TuyaPlugC
             ))
         return plugs
     except Exception as e:
-        print(f"  WARNING: SG_ACTUATORS parse error: {e}, using defaults")
+        logger.warning("SG_ACTUATORS parse error: %s, using defaults", e)
         return [TuyaPlugConfig(**defaults)]
 
 
@@ -266,13 +276,15 @@ def load_config(base_dir: str) -> SuperGuardConfig:
             env[key] = os.environ[key]
     
     # Validate required
-    token = env.get("SG_TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise SystemExit("SG_TELEGRAM_BOT_TOKEN not set in sguard.env")
-    
-    plug_key = env.get("SG_PLUG_KEY")
-    if not plug_key:
-        raise SystemExit("SG_PLUG_KEY not set in sguard.env")
+        token = env.get("SG_TELEGRAM_BOT_TOKEN")
+        if not token:
+            raise SystemExit("SG_TELEGRAM_BOT_TOKEN not set in sguard.env")
+
+        # SG_PLUG_KEY is only required for legacy single-plug config (not SG_ACTUATORS)
+        plug_key = env.get("SG_PLUG_KEY")
+        has_actuators = bool(env.get("SG_ACTUATORS", "").strip())
+        if not plug_key and not has_actuators:
+            raise SystemExit("SG_PLUG_KEY not set in sguard.env (or use SG_ACTUATORS for multi-plug)")
     
     # Telegram
     telegram = TelegramConfig(

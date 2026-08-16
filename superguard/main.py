@@ -34,163 +34,171 @@ from superguard.telegram import SuperGuardBot
 from superguard.storage import SettingsStore, EnvWriter
 from superguard.tuya_cloud import create_tuya_cloud_sync
 
+from superguard.logging_config import get_logger, setup_logging
+
+# Initialize structured logging
+logger = get_logger(__name__)
+setup_logging(
+    log_level=os.environ.get("SG_LOG_LEVEL", "INFO"),
+    log_file=os.environ.get("SG_LOG_FILE"),
+    json_format=os.environ.get("SG_LOG_JSON", "true").lower() == "true"
+)
+
 
 class SuperGuardApplication:
     """Main application class - wires all components and manages lifecycle.
-    
+
     Responsibilities:
     - Initialize all subsystems in correct dependency order
     - Manage background threads (Telegram poll, Tuya Cloud sync)
     - Run detection loop in main thread
     - Handle graceful shutdown (SIGINT/SIGTERM)
     - Provide shared SettingsStore and EnvWriter to components
-    
+
     Initialization order (critical for dependencies):
     1. SettingsStore.load() - must be first, bot commands need persisted settings
     2. SuperGuardBot creation - creates CameraManager, ActuatorManager, AlarmManager
     3. Bot.load_settings() - loads camera settings into bot from shared store
     4. Bot.set_bot_menu() - sets Telegram command menu
     5. Tuya Cloud sync - background thread for cloud-based IP discovery
-    
+
     Threading model:
     - Main thread: detection_loop() (CPU-intensive YOLO processing)
     - Background thread: bot.poll_loop() (Telegram long-poll)
     - Background thread: TuyaCloudSync (periodic cloud API calls)
     - Per-alarm threads: bot._update_loop(cam_id) (spawned on trigger)
     """
-    
+
     def __init__(self, config: SuperGuardConfig):
         self.config = config
         self.running = False
         self.threads: list[threading.Thread] = []
-        
+
         # Core components (initialized in initialize())
         self.bot: SuperGuardBot = None
         self.tuya_sync = None
         self.settings_store = SettingsStore(config)
         self.env_writer = EnvWriter(os.path.join(config.base_dir, "sguard.env"))
-        
+
         # Frame directory for saved alarm frames
         os.makedirs(config.frame_dir, exist_ok=True)
-    
+
     def initialize(self):
         """Initialize all components in correct order.
-        
+
         This separation from __init__ allows:
         - Clean error handling during init
         - Dependency injection (settings_store shared with bot)
         - Easy testing of individual components
         """
-        print("Initializing SuperGuard Alarm...")
-        
+        logger.info("Initializing SuperGuard Alarm...")
+
         # 1. Load persisted settings FIRST (commands need them)
         self.settings_store.load()
-        print("  Settings loaded")
-        
+        logger.info("Settings loaded")
+
         # 2. Create bot (which creates CameraManager, ActuatorManager, etc.)
         self.bot = SuperGuardBot(self.config)
         self.bot.settings_store = self.settings_store  # Inject shared store
         self.bot.load_settings()  # This loads camera settings into bot
-        print("  Bot created")
-        
+        logger.info("Bot created")
+
         # 3. Set up bot menu
         self.bot.set_bot_menu()
-        print("  Bot menu set")
-        
+        logger.info("Bot menu set")
+
         # 4. Initialize Tuya Cloud sync (background)
-        self.tuya_sync = create_tuya_cloud_sync(self.config)
+        self.tuya_sync = create_tuya_cloud_sync(self.config, actuator_manager=self.bot.actuator_manager)
         if self.tuya_sync:
-            print("  Tuya Cloud sync started")
-        
-        print("Initialization complete")
-    
+            logger.info("Tuya Cloud sync started")
+
+        logger.info("Initialization complete")
+
     def start(self):
         """Start all background threads and run detection loop.
-        
+
         Detection loop runs in MAIN thread (blocking) because:
         - YOLO inference is CPU-intensive, should not be in daemon thread
         - Easier to handle KeyboardInterrupt for clean shutdown
         - Main thread owns the process lifetime
-        
+
         Background threads:
         - telegram-poll: bot.poll_loop() - long-poll getUpdates
         - tuya-cloud-sync: tuya_sync thread - periodic cloud API
         """
         if self.running:
             return
-        
+
         self.running = True
-        print("Starting SuperGuard Alarm...")
-        
+        logger.info("Starting SuperGuard Alarm...")
+
         # Start Telegram poll loop
         poll_thread = threading.Thread(target=self.bot.poll_loop, daemon=True, name="telegram-poll")
         poll_thread.start()
         self.threads.append(poll_thread)
-        print("  Telegram poll loop started")
-        
+        logger.info("Telegram poll loop started")
+
         # Start detection loop (main thread runs this)
-        print("  Starting detection loop...")
+        logger.info("Starting detection loop...")
         try:
             self.bot.detection_loop()
         except KeyboardInterrupt:
-            print("\nShutdown requested")
+            logger.info("Shutdown requested")
         except Exception as e:
-            print(f"\nDetection loop CRASHED: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Detection loop CRASHED: %s", e)
         finally:
             self.shutdown()
-    
+
     def shutdown(self):
         """Graceful shutdown of all components.
-        
+
         Order matters:
         1. Stop Tuya sync (background thread)
         2. Stop cameras (releases VideoCapture, HTTP sessions)
         3. Flush settings (force_flush cancels debounce timer)
         4. Join background threads with timeout
-        
+
         Uses timeout on thread joins to avoid hanging on stuck threads.
         """
         if not self.running:
             return
-        
+
         self.running = False
-        print("\nShutting down...")
-        
+        logger.info("Shutting down...")
+
         # Stop Tuya sync
         if self.tuya_sync:
             self.tuya_sync.stop()
-            print("  Tuya Cloud sync stopped")
-        
+            logger.info("Tuya Cloud sync stopped")
+
         # Stop cameras
         self.bot.camera_manager.stop_all()
-        print("  Cameras stopped")
-        
+        logger.info("Cameras stopped")
+
         # Flush settings
         self.settings_store.force_flush()
-        print("  Settings flushed")
-        
+        logger.info("Settings flushed")
+
         # Wait for threads (with timeout)
         for t in self.threads:
             if t.is_alive():
                 t.join(timeout=2)
-        
-        print("Shutdown complete")
+
+        logger.info("Shutdown complete")
 
 
 def kill_other_instances():
     """Kill other python.exe processes running panic_mode or main.py (safe, cmdline-filtered).
-    
+
     Prevents multiple bot instances from polling getUpdates simultaneously (causes 409 Conflict).
-    
+
     Safety measures:
     - Never kills current process (mypid check)
     - Only targets python.exe processes
     - Filters by cmdline: 'superguard.main', 'superguard/main.py', 'panic_mode'
     - EXCLUDES watchdog process (watchdog manages the service)
     - Uses psutil for cross-platform process inspection
-    
+
     Called at startup before initializing to ensure clean state.
     """
     try:
@@ -214,14 +222,14 @@ def kill_other_instances():
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
         if killed:
-            print(f"  Killed stale instances: {killed}")
+            logger.info("Killed stale instances: %s", killed)
     except Exception as e:
-        print(f"  Zombie kill error: {e}")
+        logger.error("Zombie kill error: %s", e)
 
 
 def main():
     """Entry point.
-    
+
     Flow:
     1. Kill other instances (prevents 409 Conflict)
     2. Load configuration (from sguard.env + defaults)
@@ -231,10 +239,10 @@ def main():
     """
     # Kill any other instances first
     kill_other_instances()
-    
+
     # Load configuration
     config = load_config(str(BASE_DIR))
-    
+
     # Create and run application
     app = SuperGuardApplication(config)
     app.initialize()

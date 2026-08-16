@@ -26,6 +26,9 @@ desktop.ini
 
 # Local config with secrets - keep the example only
 sguard.env
+sguard.env.local
+*.env
+*.env.local
 
 # Test files
 run_test.py
@@ -41,3 +44,16 @@ bot.log
 bot_probe.log
 watchdog.log
 direct_test.log
+
+# === SECRETS & KEYS (critical) ===
+*API-KEYS*
+*api-key*
+*secret*
+*token*
+*credential*
+LLM-API-KEYS*
+*.keys
+*.pem
+*.key
+id_rsa*
+id_ed25519*
