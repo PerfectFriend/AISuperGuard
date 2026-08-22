@@ -43,12 +43,13 @@ async def lifespan(app: FastAPI):
     app.state.camera_monitor = camera_monitor
     await camera_monitor.start(interval=60)  # Check every 60 seconds
 
-    # Start detection engine with WS manager
+    # Start detection engine with Redis WS manager
     from app.services.detection_engine import DetectionEngine
-    from app.api.v1.endpoints.websocket import manager as ws_manager
-    detection_engine = DetectionEngine(ws_manager=ws_manager)
+    from app.services.redis_manager import get_redis_manager
+    redis_manager = await get_redis_manager()
+    detection_engine = DetectionEngine(ws_manager=redis_manager)
     app.state.detection_engine = detection_engine
-    app.state.ws_manager = ws_manager  # Expose for other services
+    app.state.redis_manager = redis_manager
     await detection_engine.initialize()
     detection_engine.start()
 

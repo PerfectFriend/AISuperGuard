@@ -13,11 +13,12 @@ from app.core.config import settings
 
 
 engine = create_async_engine(
-    settings.database_url,
+    settings.database_url_async,
     echo=settings.debug,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    pool_pre_ping=False,  # Disable to avoid event loop conflicts
+    pool_size=5,
+    max_overflow=10,
+    poolclass=None,  # Use default async pool
 )
 
 async_session_maker = async_sessionmaker(

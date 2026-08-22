@@ -28,9 +28,23 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./superguard.db"
+    # PostgreSQL (for production)
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_user: str = "superguard"
+    postgres_password: str = "superguard"
+    postgres_db: str = "superguard"
+
+    @property
+    def database_url_async(self) -> str:
+        """Return async database URL - PostgreSQL if configured, else SQLite."""
+        if self.postgres_host and self.postgres_port and self.postgres_user:
+            return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        return self.database_url
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
+    redis_pubsub_channel: str = "superguard:ws"
 
     # JWT
     jwt_secret_key: str = "change-me-in-production"

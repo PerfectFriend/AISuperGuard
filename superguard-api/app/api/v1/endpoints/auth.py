@@ -111,7 +111,7 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
 
-    user.last_login = datetime.now(timezone.utc)
+    user.last_login = datetime.utcnow()
 
     # Get user roles from site_users
     from app.models import SiteUser
@@ -128,7 +128,7 @@ async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(
     rt = RefreshToken(
         user_id=user.id,
         token_hash=sha256(refresh.encode()).hexdigest(),
-        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days),
+        expires_at=datetime.utcnow() + timedelta(days=settings.refresh_token_expire_days),
     )
     db.add(rt)
     await db.flush()
@@ -151,7 +151,7 @@ async def register(req: RegisterRequest, request: Request, db: AsyncSession = De
         await log_audit(db, None, "register_failed", "user", None, {"reason": "invalid_invite_token"}, request)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid invite token")
     
-    if invite.expires_at and invite.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+    if invite.expires_at and invite.expires_at.replace(tzinfo=None) < datetime.utcnow():
         await log_audit(db, None, "register_failed", "user", None, {"reason": "expired_invite_token"}, request)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invite token expired")
     
@@ -228,7 +228,7 @@ async def refresh_token(req: RefreshRequest, db: AsyncSession = Depends(get_db))
 
     new_access = create_access_token(subject=user.username, user_id=str(user.id), roles=roles)
     new_refresh = create_refresh_token(user_id=str(user.id))
-    rt.revoked_at = datetime.now(timezone.utc)
+    rt.revoked_at = datetime.utcnow()
 
     return TokenResponse(access_token=new_access, refresh_token=new_refresh)
 
@@ -275,7 +275,7 @@ async def create_invite_token(
     token = secrets.token_urlsafe(32)
     expires_at = None
     if req.expires_days:
-        expires_at = datetime.now(timezone.utc) + timedelta(days=req.expires_days)
+        expires_at = datetime.utcnow() + timedelta(days=req.expires_days)
     
     invite = InviteToken(
         token=token,

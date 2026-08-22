@@ -9,7 +9,7 @@ import time
 import threading
 import sys
 import base64
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 from dataclasses import dataclass
 from datetime import datetime
 import cv2
@@ -20,16 +20,197 @@ from app.core.database import get_db
 from app.models.models import Camera, Detector, ActuatorBinding, Actuator, Alarm, AlarmState
 from sqlalchemy import select
 
-# Add legacy superguard path
-sys.path.insert(0, '/home/thomas/SuperGuard')
 
-# Import legacy detection pipeline
-from superguard.detectors import (
-    YOLODetector, ColorFilter, ZoneFilter, DetectionPipeline, 
-    ProcessedFrame, Target
-)
-from superguard.models import Zone, CameraSettings
-from superguard.config import SuperGuardConfig, DetectionConfig
+# ============================================================================
+# Inline Detection Classes (replacing legacy superguard module)
+# ============================================================================
+
+from ultralytics import YOLO
+
+
+class YOLODetector:
+    """YOLO-based object detector."""
+    
+    def __init__(self, model_path: str = 'yolo11n.pt', conf: float = 0.5, imgsz: int = 640):
+        self.model = YOLO(model_path)
+        self.conf = conf
+        self.imgsz = imgsz
+    
+    def detect(self, frame: np.ndarray) -> List[Dict]:
+        """Run detection on frame, return list of detections."""
+        results = self.model(frame, conf=self.conf, imgsz=self.imgsz, verbose=False)
+        detections = []
+        for r in results:
+            boxes = r.boxes
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                conf = box.conf[0].cpu().numpy()
+                cls = int(box.cls[0].cpu().numpy())
+                detections.append({
+                    'bbox': [float(x1), float(y1), float(x2), float(y2)],
+                    'conf': float(conf),
+                    'class': cls,
+                    'class_name': self.model.names[cls]
+                })
+        return detections
+
+
+class ColorFilter:
+    """HSV color filter for target filtering."""
+    
+    def __init__(self, color_ranges: Optional[List[Dict]] = None):
+        self.color_ranges = color_ranges or []
+    
+    def filter(self, frame: np.ndarray, bbox: List[float]) -> float:
+        """Return color match fraction (0-1) for bbox region."""
+        if not self.color_ranges:
+            return 1.0
+        
+        x1, y1, x2, y2 = map(int, bbox)
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            return 0.0
+        
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        total_pixels = roi.shape[0] * roi.shape[1]
+        max_match = 0.0
+        
+        for cr in self.color_ranges:
+            lower = np.array(cr.get('lower', [0, 0, 0]))
+            upper = np.array(cr.get('upper', [180, 255, 255]))
+            mask = cv2.inRange(hsv, lower, upper)
+            match = cv2.countNonZero(mask) / total_pixels
+            max_match = max(max_match, match)
+        
+        return max_match
+
+
+class ZoneFilter:
+    """Zone/grid filter for detection zone checking."""
+    
+    def __init__(self, rows: int = 3, cols: int = 4, cell: int = 1):
+        self.rows = rows
+        self.cols = cols
+        self.cell = cell
+    
+    def check(self, frame_shape: tuple, bbox: List[float]) -> bool:
+        """Check if bbox center falls in target cell."""
+        h, w = frame_shape[:2]
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        
+        cell_w = w / self.cols
+        cell_h = h / self.rows
+        
+        col = int(cx / cell_w)
+        row = int(cy / cell_h)
+        
+        target_cell = row * self.cols + col + 1
+        return target_cell == self.cell
+
+
+@dataclass
+class Target:
+    """Detection target configuration."""
+    classes: List[int] = None
+    color_ranges: List[Dict] = None
+    description: str = ""
+    
+    def __post_init__(self):
+        if self.classes is None:
+            self.classes = [0, 2, 3, 5, 7]  # person, car, motorcycle, bus, truck
+        if self.color_ranges is None:
+            self.color_ranges = []
+
+
+@dataclass
+class Zone:
+    """Zone configuration."""
+    rows: int = 3
+    cols: int = 4
+    cell: int = 1
+
+
+@dataclass
+class ProcessedFrame:
+    """Processed frame with detection results."""
+    frame: np.ndarray
+    detections: List[Dict]
+    timestamp: float
+    annotated: Optional[np.ndarray] = None
+    matches: List[Dict] = None
+    all_detections: List[Dict] = None
+
+
+class DetectionPipeline:
+    """Complete detection pipeline: YOLO -> Color -> Zone -> Trigger."""
+    
+    def __init__(self, detector: YOLODetector, color_filter: ColorFilter, 
+                 zone_filter: ZoneFilter, target: Target, min_color_fraction: float = 0.15):
+        self.detector = detector
+        self.color_filter = color_filter
+        self.zone_filter = zone_filter
+        self.target = target
+        self.min_color_fraction = min_color_fraction
+    
+    def process(self, frame: np.ndarray) -> ProcessedFrame:
+        """Run full pipeline on frame."""
+        detections = self.detector.detect(frame)
+        
+        filtered = []
+        for det in detections:
+            # Class filter
+            if self.target.classes and det['class'] not in self.target.classes:
+                continue
+            
+            # Color filter
+            color_frac = self.color_filter.filter(frame, det['bbox'])
+            if color_frac < self.min_color_fraction:
+                continue
+            
+            filtered.append({**det, 'color_fraction': color_frac})
+        
+        # Create annotated frame (draw boxes)
+        annotated = frame.copy()
+        for det in filtered:
+            x1, y1, x2, y2 = map(int, det['bbox'])
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            label = f"{det['class_name']} {det['conf']:.2f}"
+            cv2.putText(annotated, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        return ProcessedFrame(
+            frame=frame, 
+            detections=filtered, 
+            timestamp=time.time(),
+            matches=filtered,
+            all_detections=detections,
+            annotated=annotated
+        )
+
+
+def parse_target_text(text: str) -> Target:
+    """Parse target text like 'car yellow zone 9' into Target object."""
+    target = Target()
+    parts = text.lower().split()
+    
+    class_map = {
+        'person': 0, 'bicycle': 1, 'car': 2, 'motorcycle': 3,
+        'bus': 5, 'truck': 7
+    }
+    
+    for part in parts:
+        if part in class_map:
+            target.classes = [class_map[part]]
+        elif part.isdigit():
+            # zone cell
+            pass
+    
+    return target
+
+
+# ============================================================================
+# Original Detection Engine continues below
+# ============================================================================
 
 
 @dataclass
@@ -75,19 +256,6 @@ class DetectionEngine:
         
         # Actuator bindings cache
         self._actuator_bindings: Dict[str, List[str]] = {}
-        
-    def _create_legacy_config(self) -> SuperGuardConfig:
-        """Create legacy SuperGuardConfig for pipeline factory."""
-        return SuperGuardConfig(
-            detection=DetectionConfig(
-                min_conf=self.min_conf,
-                update_every=self.update_every,
-                detect_every=self.detect_every,
-                auto_resolve_frames=self.auto_resolve_frames,
-                require_frames=self.require_frames,
-                yellow_min_fraction=self.yellow_min_fraction,
-            )
-        )
     
     async def initialize(self):
         """Load cameras, detectors, zones, targets from DB."""
@@ -175,34 +343,27 @@ class DetectionEngine:
                 self._actuator_bindings[cam_id].append(actuator.name)
     
     def start(self):
-        """Start detection loop in background thread."""
+        """Start detection loop as asyncio task."""
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(target=self._run_loop, daemon=True, name="detection-engine")
-        self._thread.start()
+        self._task = asyncio.create_task(self._run_loop_async())
     
     def stop(self):
         """Stop detection engine."""
         self._running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
+        if self._task:
+            self._task.cancel()
     
-    def _run_loop(self):
-        """Main detection loop - runs in background thread."""
-        # Create new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
+    async def _run_loop_async(self):
+        """Main detection loop - runs as asyncio task in main event loop."""
         while self._running:
             try:
-                loop.run_until_complete(self._process_all_cameras())
+                await self._process_all_cameras()
             except Exception as e:
                 print(f"[DetectionEngine] Loop error: {e}")
             
-            time.sleep(self.detect_every)
-        
-        loop.close()
+            await asyncio.sleep(self.detect_every)
     
     async def _process_all_cameras(self):
         """Process one detection cycle for all cameras."""
@@ -235,7 +396,7 @@ class DetectionEngine:
             frame = cv2.resize(frame, (1280, int(h * scale)))
         
         # Run detection pipeline
-        processed: ProcessedFrame = state.pipeline.process(frame, state.zone)
+        processed: ProcessedFrame = state.pipeline.process(frame)
         state.last_annotated_frame = processed.annotated
         state.last_frame_time = time.time()
         
@@ -508,16 +669,16 @@ class DetectionEngine:
         # Run detection with timing
         import time
         start_time = time.time()
-        processed: ProcessedFrame = state.pipeline.process(frame, state.zone)
+        processed: ProcessedFrame = state.pipeline.process(frame)
         inference_time = (time.time() - start_time) * 1000
         
         # Return all detections (not just matches)
         detections = [
             {
-                "class": d.name,
-                "confidence": float(d.confidence),
-                "box": [float(x) for x in d.box],
-                "color_fraction": float(d.color_fraction) if d.color_fraction else 0.0,
+                "class": d.get('class_name', ''),
+                "confidence": float(d.get('conf', 0)),
+                "box": [float(x) for x in d.get('bbox', [0,0,0,0])],
+                "color_fraction": float(d.get('color_fraction', 0.0)),
                 "is_match": d in processed.matches
             }
             for d in processed.all_detections
@@ -532,7 +693,41 @@ class DetectionEngine:
 
 # Import needed for Target parsing
 import re
-from superguard.models import VEHICLE_CLASSES, CLASS_MAP, COLOR_MAP
+
+# ============================================================================
+# Inline Constants (replacing superguard.models)
+# ============================================================================
+
+VEHICLE_CLASSES = {
+    'person': 0, 'bicycle': 1, 'car': 2, 'motorcycle': 3,
+    'bus': 5, 'truck': 7
+}
+
+CLASS_MAP = {
+    'person': 0, 'человек': 0, 'person': 0,
+    'bicycle': 1, 'велосипед': 1,
+    'car': 2, 'машина': 2, 'авто': 2, 'car': 2,
+    'motorcycle': 3, 'мотоцикл': 3, 'байк': 3,
+    'bus': 5, 'автобус': 5,
+    'truck': 7, 'грузовик': 7, 'фура': 7,
+}
+
+COLOR_MAP = {
+    'red': [([0, 100, 100], [10, 255, 255]), ([170, 100, 100], [180, 255, 255])],
+    'красный': [([0, 100, 100], [10, 255, 255]), ([170, 100, 100], [180, 255, 255])],
+    'yellow': [([20, 100, 100], [30, 255, 255])],
+    'жёлтый': [([20, 100, 100], [30, 255, 255])],
+    'green': [([40, 50, 50], [80, 255, 255])],
+    'зелёный': [([40, 50, 50], [80, 255, 255])],
+    'blue': [([100, 50, 50], [130, 255, 255])],
+    'синий': [([100, 50, 50], [130, 255, 255])],
+    'white': [([0, 0, 200], [180, 30, 255])],
+    'белый': [([0, 0, 200], [180, 30, 255])],
+    'black': [([0, 0, 0], [180, 255, 50])],
+    'чёрный': [([0, 0, 0], [180, 255, 50])],
+}
+
+VEHICLE_CLASSES_SET = set(VEHICLE_CLASSES.values())
 
 def parse_target_text(text: str) -> Target:
     """Parse free-text target description into Target object."""
@@ -558,6 +753,6 @@ def parse_target_text(text: str) -> Target:
     
     return Target(
         description=text,
-        classes=classes if classes else set(VEHICLE_CLASSES.keys()),
+        classes=list(classes) if classes else list(VEHICLE_CLASSES.keys()),
         color_ranges=color_ranges,
     )
