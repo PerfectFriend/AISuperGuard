@@ -1,0 +1,22 @@
+[
+  {"content": "Implement site creation API endpoint", "id": "1", "status": "completed"},
+  {"content": "Implement camera CRUD endpoints", "id": "2", "status": "completed"},
+  {"content": "Implement actuator CRUD and command endpoints", "id": "3", "status": "completed"},
+  {"content": "Implement detector CRUD endpoints", "id": "4", "status": "completed"},
+  {"content": "Implement alarm endpoints (list, get, ack, silence)", "id": "5", "status": "completed"},
+  {"content": "Implement notifier CRUD endpoints", "id": "6", "status": "completed"},
+  {"content": "Implement WebSocket real-time events", "id": "7", "status": "completed"},
+  {"content": "Create React/TS dashboard skeleton with routing", "id": "8", "status": "completed"},
+  {"content": "Add authentication context and protected routes", "id": "9", "status": "completed"},
+  {"content": "Implement Sites page with list and create form", "id": "10", "status": "completed"},
+  {"content": "Implement Cameras page with list, create, and test", "id": "11", "status": "completed"},
+  {"content": "Implement Actuators page with list, create, and command buttons", "id": "12", "status": "completed"},
+  {"content": "Implement Dashboard overview widget", "id": "13", "status": "completed"},
+  {"content": "Add API error handling and loading states", "id": "14", "status": "completed"},
+  {"content": "Write unit tests for frontend components", "id": "15", "status": "completed"},
+  {"content": "Wire alarm events to Telegram bot (send alarm messages with annotated frames)", "id": "16", "status": "completed"},
+  {"content": "Integrate YOLO detection pipeline with zone checking and alarm triggering", "id": "17", "status": "completed"},
+  {"content": "Ensure bot commands (/arm, /disarm, /status, /plug, etc.) are fully functional", "id": "18", "status": "completed"},
+  {"content": "Test end-to-end: motion detection in zone → alarm → Telegram message with annotated frame → actuator control", "id": "19", "status": "completed"},
+  {"content": "Documentation: update README with setup and usage instructions for new features", "id": "20", "status": "completed"}
+]

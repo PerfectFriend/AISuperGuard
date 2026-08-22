@@ -1,59 +1,77 @@
+# SuperGuard .gitignore
+
 # Python
 __pycache__/
-*.pyc
-*.pyo
-.venv/
+*.py[cod]
+*$py.class
+*.so
+.Python
 venv/
-*.egg-info/
+.venv/
+env/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
 
-# Runtime state
-desktop_state/
-saved_frames/
-sguard_settings.json
-*.log
-
-# Desktop build artifacts
-desktop/build/
-desktop/dist/
-desktop/*.spec
-
-# Models (downloaded by ultralytics on first run)
-*.pt
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
 # OS
+.DS_Store
 Thumbs.db
-desktop.ini
 
-# Local config with secrets - keep the example only
-sguard.env
-sguard.env.local
-*.env
-*.env.local
+# Database
+*.db
+*.sqlite
+*.sqlite3
 
-# Test files
-run_test.py
-kill_zombies.ps1
+# Environment
+.env
+.env.local
+.env.*.local
 
-# Evolution cron runtime state
-evolution_state.json
-bg_test.txt
-bot_probe.py
-sig_probe.py
-probe_bg.log
-bot.log
-bot_probe.log
-watchdog.log
-direct_test.log
+# Logs
+logs/
+*.log
 
-# === SECRETS & KEYS (critical) ===
-*API-KEYS*
-*api-key*
-*secret*
-*token*
-*credential*
-LLM-API-KEYS*
-*.keys
-*.pem
-*.key
-id_rsa*
-id_ed25519*
+# Build
+dist/
+build/
+*.egg-info/
+
+# SuperGuard specific
+superguard-api/.venv/
+superguard-api/superguard.db
+superguard-api/keys/private.pem
+superguard-api/keys/public.pem
+superguard-dashboard/node_modules/
+superguard-dashboard/dist/
+superguard-dashboard/.vite/
+
+# Backups
+*.tar.gz
+*.bak
+*.backup*
+
+# Model weights
+*.pt
+*.onnx
+*.engine
+
+# Media
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.webm
+
+# MediaMTX
+mediamtx.ymldesktop/SuperGuardDesktop.spec
+desktop/SuperGuardDesktop.spec
