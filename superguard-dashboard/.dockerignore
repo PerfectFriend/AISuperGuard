@@ -1,0 +1,17 @@
+# SuperGuard Dashboard .dockerignore
+node_modules
+dist
+.env
+.env.*
+*.log
+.git
+.gitignore
+README.md
+Dockerfile
+.dockerignore
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store

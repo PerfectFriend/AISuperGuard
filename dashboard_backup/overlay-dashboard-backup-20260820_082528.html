@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>AI GUARDIAN Menu</title>
+    <style>
+        body { margin: 0; padding: 0; background: #000; position: relative; }
+        img { display: block; width: 100%; height: auto; }
+        .metric-panel {
+            position: absolute;
+            height: 62px;
+            background: #000011;
+            color: #fff;
+            font-family: monospace;
+            font-size: 32.3px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+        }
+        .left-overlay {
+            position: absolute;
+            left: 102px;
+            background: rgba(255,0,0,0.2);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <img src="/grok-menu.jpg?v=62" alt="AI GUARDIAN Menu" usemap="#menu-map" width="1280" height="720">
+    <!-- Left column overlays for visual feedback -->
+    <div class="left-overlay" style="top:0px; width:148px; height:50px;"></div>
+    <div class="left-overlay" style="top:55px; width:148px; height:80px;"></div>
+    <div class="left-overlay" style="top:185px; width:148px; height:65px;"></div>
+    <div class="left-overlay" style="top:250px; width:148px; height:64px;"></div>
+    <div class="left-overlay" style="top:314px; width:148px; height:65px;"></div>
+    <div class="left-overlay" style="top:379px; width:148px; height:65px;"></div>
+    <div class="left-overlay" style="top:444px; width:148px; height:65px;"></div>
+    <div class="left-overlay" style="top:509px; width:148px; height:65px;"></div>
+    <div class="left-overlay" style="top:574px; width:148px; height:65px;"></div>
+    <!-- Metric column (right) shifted right by 20px -->
+    <div class="metric-panel" style="left:1088px; width:119.8px; top:72px;">2</div>
+    <div class="metric-panel" style="left:1088px; width:119.8px; top:216px;">4</div>
+    <div class="metric-panel" style="left:1088px; width:119.8px; top:360px;">6</div>
+    <div class="metric-panel" style="left:1088px; width:119.8px; top:504px;">8</div>
+    <div class="metric-panel" style="left:1078px; width:239.6px; top:648px;">10</div>
+    <map name="menu-map">
+        <area shape="rect" coords="102,0,240,50" href="/" target="_blank" alt="Dashboard">
+        <area shape="rect" coords="102,55,240,135" href="/oxrana" target="_blank" alt="ОХРАНА">
+        <area shape="rect" coords="102,185,240,250" href="/sites" target="_blank" alt="Projects">
+        <area shape="rect" coords="102,250,240,314" href="/cameras" target="_blank" alt="Cameras">
+        <area shape="rect" coords="102,314,240,379" href="/detectors" target="_blank" alt="Detectors">
+        <area shape="rect" coords="102,379,240,444" href="/actuators" target="_blank" alt="Executors">
+        <area shape="rect" coords="102,444,240,509" href="/alarms" target="_blank" alt="Alarms">
+        <area shape="rect" coords="102,509,240,574" href="/notifiers) target="_blank" alt="Notifiers">
+        <area shape="rect" coords="102,574,240,639" href="/system" target="_blank" alt="System">
+    </map>
+</body>
+</html>

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superguard"
+version = "1.0.0"
+description = "SuperGuard Alarm - AI video surveillance with smart plug response"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "ultralytics>=8.0",
+    "torch>=2.0",
+    "tinytuya>=1.5",
+    "requests>=2.31",
+    "psutil>=5.9",
+    "pycryptodome>=3.18",
+    "pyaes>=1.6",
+]
+
+[project.optional-dependencies]
+desktop = [
+    "pystray>=0.19",
+    "Pillow>=10.0",
+]
+dev = [
+    "pyinstaller>=6.0",
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["superguard*", "desktop*"]
+
+[tool.setuptools.package-dir]
+"superguard" = "superguard"
+"desktop" = "desktop"
