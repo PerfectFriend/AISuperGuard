@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useCameras, useActuators, useDetectors, useAlarms, type Camera, type ActuatorBinding } from '@/hooks/useApiData';
 import { VideoPlayer } from '@/components/VideoPlayer';
+import { ZoneEditor, zoneFromString } from '@/components/ZoneEditor';
 import { api } from '@/api/api';
 
 export default function CameraDetail() {
@@ -228,9 +229,18 @@ export default function CameraDetail() {
                 <CardTitle>{t('detectionZone')}</CardTitle>
               </CardHeader>
               <CardContent>
-                <pre className="bg-gray-100 dark:bg-gray-800 p-4 rounded text-sm overflow-auto">
-                  {JSON.stringify(camera.zone, null, 2)}
-                </pre>
+                <ZoneEditor
+                  src={camera.stream_url}
+                  type={camera.type as any}
+                  width={camera.width}
+                  height={camera.height}
+                  initialZone={zoneFromString(typeof camera.zone === 'string' ? camera.zone : JSON.stringify(camera.zone))}
+                  onZoneChange={(newZone) => {
+                    // Update camera zone via API
+                    console.log('Zone changed:', newZone);
+                  }}
+                  className="w-full"
+                />
               </CardContent>
             </Card>
           )}
