@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -6,6 +6,7 @@ import { RefreshCw, Video, Shield, Zap, Settings, Loader2, AlertTriangle, Bell, 
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useSiteDashboard, useSystemLogs, useSites } from '@/hooks/useApiData';
+import { useAlarmWebSocket, useCameraWebSocket, useSystemWebSocket } from '@/hooks/useWebSocket';
 
 export default function Dashboard() {
   const { t } = useTranslation('dashboard');
@@ -38,9 +39,61 @@ export default function Dashboard() {
   const handleViewAlarms = () => navigate('/alarms');
   const handleViewSites = () => navigate('/sites');
 
-  const healthConnected = false;
-  const alarmConnected = false;
-  const pushPermission = 'default' as NotificationPermission;
+  // WebSocket connection states
+  const [healthConnected, setHealthConnected] = useState(false);
+  const [alarmConnected, setAlarmConnected] = useState(false);
+  const [pushPermission, setPushPermission] = useState<NotificationPermission>('default');
+
+  // Request notification permission on mount
+  useEffect(() => {
+    if ('Notification' in window) {
+      setPushPermission(Notification.permission);
+    }
+  }, []);
+
+  // WebSocket handlers
+  const handleAlarmUpdate = useCallback((msg: any) => {
+    // Update alarms from WebSocket
+    if (msg.payload) {
+      setRecentAlarms(prev => {
+        const existing = prev.findIndex(a => a.id === msg.payload.id);
+        if (existing >= 0) {
+          const updated = [...prev];
+          updated[existing] = msg.payload;
+          return updated;
+        }
+        return [msg.payload, ...prev.slice(0, 4)];
+      });
+    }
+  }, []);
+
+  const handleCameraUpdate = useCallback(() => {
+    // Camera status updates - refresh dashboard
+    refetchDashboard();
+  }, [refetchDashboard]);
+
+  const handleHealthUpdate = useCallback(() => {
+    // Health updates - refresh dashboard
+    refetchDashboard();
+  }, [refetchDashboard]);
+
+  const handleLogUpdate = useCallback((msg: any) => {
+    // System log updates
+    if (msg.payload) {
+      setRecentLogs(prev => [msg.payload, ...prev.slice(0, 4)]);
+    }
+  }, []);
+
+  // WebSocket connections
+  const alarmWs = useAlarmWebSocket(siteId, handleAlarmUpdate);
+  useCameraWebSocket(siteId, handleCameraUpdate);
+  const systemWs = useSystemWebSocket(siteId, handleHealthUpdate, handleLogUpdate);
+
+  // Update connection states
+  useEffect(() => {
+    setAlarmConnected(alarmWs.connected);
+    setHealthConnected(systemWs.connected);
+  }, [alarmWs.connected, systemWs.connected]);
 
   if (dashboardLoading || sitesLoading) {
     return (

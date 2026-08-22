@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 
 interface WebSocketMessage {
   type: string;
@@ -8,69 +8,88 @@ interface WebSocketMessage {
 
 type MessageHandler = (message: WebSocketMessage) => void;
 
-export function useWebSocket(url: string, handlers: Map<string, MessageHandler> = new Map()) {
+interface UseWebSocketOptions {
+  url: string;
+  handlers: Map<string, MessageHandler>;
+  onOpen?: () => void;
+  onClose?: () => void;
+  onError?: (error: Event) => void;
+  reconnect?: boolean;
+  maxReconnectAttempts?: number;
+  baseReconnectDelay?: number;
+}
+
+export function useWebSocket(options: UseWebSocketOptions) {
+  const { url, handlers, onOpen, onClose, onError, reconnect = true, maxReconnectAttempts = 10, baseReconnectDelay = 1000 } = options;
+  
   const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
-  const maxReconnectAttempts = 10;
-  const baseReconnectDelay = 1000;
-
+  const handlersRef = useRef(handlers);
+  
+  // Keep handlers ref updated
+  handlersRef.current = handlers;
+  
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
+    
     try {
       const ws = new WebSocket(url);
       wsRef.current = ws;
-
+      
       ws.onopen = () => {
         setConnected(true);
         setError(null);
         reconnectAttempts.current = 0;
-        console.log('WebSocket connected');
+        console.log('[WebSocket] Connected to', url);
+        onOpen?.();
       };
-
+      
       ws.onmessage = (event) => {
         try {
           const message: WebSocketMessage = JSON.parse(event.data);
-          const handler = handlers.get(message.type);
+          const handler = handlersRef.current.get(message.type);
           if (handler) {
             handler(message);
           }
-          // Call generic handlers
-          handlers.forEach((h, type) => {
+          // Call wildcard handlers
+          handlersRef.current.forEach((h, type) => {
             if (type === '*') h(message);
           });
         } catch (err) {
-          console.error('Failed to parse WebSocket message:', err);
+          console.error('[WebSocket] Failed to parse message:', err);
         }
       };
-
+      
       ws.onclose = () => {
         setConnected(false);
-        console.log('WebSocket disconnected');
+        console.log('[WebSocket] Disconnected from', url);
+        onClose?.();
         
-        if (reconnectAttempts.current < maxReconnectAttempts) {
+        if (reconnect && reconnectAttempts.current < maxReconnectAttempts) {
           const delay = baseReconnectDelay * Math.pow(2, reconnectAttempts.current);
           reconnectTimeoutRef.current = setTimeout(() => {
             reconnectAttempts.current++;
             connect();
           }, delay);
-        } else {
+        } else if (reconnectAttempts.current >= maxReconnectAttempts) {
           setError('Max reconnection attempts reached');
         }
       };
-
+      
       ws.onerror = (err) => {
         setError('WebSocket error');
-        console.error('WebSocket error:', err);
+        console.error('[WebSocket] Error:', err);
+        onError?.(err);
       };
     } catch (err) {
       setError('Failed to create WebSocket connection');
+      console.error('[WebSocket] Failed to create connection:', err);
     }
-  }, [url, handlers]);
-
+  }, [url, onOpen, onClose, onError, reconnect, maxReconnectAttempts, baseReconnectDelay]);
+  
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -81,7 +100,7 @@ export function useWebSocket(url: string, handlers: Map<string, MessageHandler> 
     }
     setConnected(false);
   }, []);
-
+  
   const send = useCallback((type: string, payload: any) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type, payload, timestamp: new Date().toISOString() }));
@@ -89,59 +108,88 @@ export function useWebSocket(url: string, handlers: Map<string, MessageHandler> 
     }
     return false;
   }, []);
-
+  
   useEffect(() => {
     connect();
     return () => disconnect();
   }, [connect, disconnect]);
-
+  
   return { connected, error, send, disconnect, reconnect: connect };
 }
 
 // Specialized hooks for common use cases - matching backend /ws/{site_id} endpoint
-export function useSiteWebSocket(siteId: string) {
-  const handlers = new Map<string, (msg: any) => void>();
-  
-  // Backend event types: alarm.triggered, alarm.acknowledged, alarm.resolved
-  // camera.status, actuator.status, detection.stats, system.health
-  return useWebSocket(`ws://localhost:3001/ws/${siteId}`, handlers);
+export function useSiteWebSocket(siteId: string, handlers: Map<string, (msg: any) => void> = new Map()) {
+  return useWebSocket({
+    url: `ws://${window.location.hostname}:3001/ws/${siteId}`,
+    handlers,
+  });
 }
 
 export function useAlarmWebSocket(siteId: string, onAlarm: (alarm: any) => void) {
-  const handlers = new Map<string, (msg: any) => void>();
-  handlers.set('alarm.triggered', (msg) => onAlarm(msg.payload));
-  handlers.set('alarm.acknowledged', (msg) => onAlarm(msg.payload));
-  handlers.set('alarm.resolved', (msg) => onAlarm(msg.payload));
+  const handlers = useMemo(() => {
+    const h = new Map<string, (msg: any) => void>();
+    h.set('alarm.triggered', (msg) => onAlarm(msg.payload));
+    h.set('alarm.acknowledged', (msg) => onAlarm(msg.payload));
+    h.set('alarm.resolved', (msg) => onAlarm(msg.payload));
+    return h;
+  }, [onAlarm]);
   
-  return useWebSocket(`ws://localhost:3001/ws/${siteId}`, handlers);
+  return useWebSocket({
+    url: `ws://${window.location.hostname}:3001/ws/${siteId}`,
+    handlers,
+  });
 }
 
 export function useCameraWebSocket(siteId: string, onCameraUpdate: (camera: any) => void) {
-  const handlers = new Map<string, (msg: any) => void>();
-  handlers.set('camera.status', (msg) => onCameraUpdate(msg.payload));
+  const handlers = useMemo(() => {
+    const h = new Map<string, (msg: any) => void>();
+    h.set('camera.status', (msg) => onCameraUpdate(msg.payload));
+    return h;
+  }, [onCameraUpdate]);
   
-  return useWebSocket(`ws://localhost:3001/ws/${siteId}`, handlers);
+  return useWebSocket({
+    url: `ws://${window.location.hostname}:3001/ws/${siteId}`,
+    handlers,
+  });
 }
 
 export function useActuatorWebSocket(siteId: string, onActuatorUpdate: (actuator: any) => void) {
-  const handlers = new Map<string, (msg: any) => void>();
-  handlers.set('actuator.status', (msg) => onActuatorUpdate(msg.payload));
-  handlers.set('actuator.command', (msg) => onActuatorUpdate(msg.payload));
+  const handlers = useMemo(() => {
+    const h = new Map<string, (msg: any) => void>();
+    h.set('actuator.status', (msg) => onActuatorUpdate(msg.payload));
+    h.set('actuator.command', (msg) => onActuatorUpdate(msg.payload));
+    return h;
+  }, [onActuatorUpdate]);
   
-  return useWebSocket(`ws://localhost:3001/ws/${siteId}`, handlers);
+  return useWebSocket({
+    url: `ws://${window.location.hostname}:3001/ws/${siteId}`,
+    handlers,
+  });
 }
 
 export function useDetectionWebSocket(siteId: string, onStats: (stats: any) => void) {
-  const handlers = new Map<string, (msg: any) => void>();
-  handlers.set('detection.stats', (msg) => onStats(msg.payload));
+  const handlers = useMemo(() => {
+    const h = new Map<string, (msg: any) => void>();
+    h.set('detection.stats', (msg) => onStats(msg.payload));
+    return h;
+  }, [onStats]);
   
-  return useWebSocket(`ws://localhost:3001/ws/${siteId}`, handlers);
+  return useWebSocket({
+    url: `ws://${window.location.hostname}:3001/ws/${siteId}`,
+    handlers,
+  });
 }
 
-export function useSystemWebSocket(onHealth: (health: any) => void, onLog: (log: any) => void) {
-  const handlers = new Map<string, (msg: any) => void>();
-  handlers.set('system.health', (msg) => onHealth(msg.payload));
-  handlers.set('system.log', (msg) => onLog(msg.payload));
+export function useSystemWebSocket(siteId: string, onHealth: (health: any) => void, onLog: (log: any) => void) {
+  const handlers = useMemo(() => {
+    const h = new Map<string, (msg: any) => void>();
+    h.set('system.health', (msg) => onHealth(msg.payload));
+    h.set('system.log', (msg) => onLog(msg.payload));
+    return h;
+  }, [onHealth, onLog]);
   
-  return useWebSocket(`ws://localhost:8080/ws/system`, handlers);
+  return useWebSocket({
+    url: `ws://${window.location.hostname}:3001/ws/${siteId}`,
+    handlers,
+  });
 }

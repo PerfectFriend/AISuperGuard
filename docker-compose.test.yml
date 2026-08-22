@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # Test database
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: superguard_test
+      POSTGRES_USER: superguard
+      POSTGRES_PASSWORD: superguard
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superguard -d superguard_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Test Redis
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly no
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Test API
+  test:
+    build:
+      context: ./superguard-api
+      dockerfile: Dockerfile.test
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://superguard:superguard@postgres:5432/superguard_test
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_BOT_TOKEN=test_token
+      - TELEGRAM_CHAT_ID=123456
+      - TELEGRAM_ENABLED=false
+      - SG_ENC_KEY=test_encryption_key_32_bytes_long!!
+      - MEDIAMTX_URL=http://mediamtx:8888
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m pytest tests/ -v --tb=short --cov=app --cov-report=term-missing

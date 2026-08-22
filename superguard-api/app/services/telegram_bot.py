@@ -55,39 +55,39 @@ class SuperGuardTelegramBot:
         logger.info(f"TelegramBot init: token={'set' if self.token else 'MISSING'}, chat_id={self.chat_id}")
 
     async def initialize(self) -> bool:
-        """Initialize the bot application."""
-        if not self.token:
-            logger.warning("Telegram bot token not configured")
-            return False
+            """Initialize the bot application."""
+            if not self.token:
+                logger.warning("Telegram bot token not configured")
+                return False
+        
+            try:
+                self.application = Application.builder().token(self.token).connect_timeout(10).read_timeout(10).build()
+                logger.debug("Telegram Application built successfully")
             
-        try:
-            self.application = Application.builder().token(self.token).build()
-            logger.debug("Telegram Application built successfully")
+                # Register handlers
+                self.application.add_handler(CommandHandler("start", self.cmd_start))
+                self.application.add_handler(CommandHandler("menu", self.cmd_menu))
+                self.application.add_handler(CommandHandler("notifiers", self.cmd_notifiers))
+                self.application.add_handler(CommandHandler("alarm", self.cmd_alarm))
+                self.application.add_handler(CommandHandler("camera", self.cmd_camera))
+                self.application.add_handler(CommandHandler("status", self.cmd_status))
+                self.application.add_handler(CommandHandler("help", self.cmd_help))
+                self.application.add_handler(CommandHandler("test_notifier", self.cmd_test_notifier))
             
-            # Register handlers
-            self.application.add_handler(CommandHandler("start", self.cmd_start))
-            self.application.add_handler(CommandHandler("menu", self.cmd_menu))
-            self.application.add_handler(CommandHandler("notifiers", self.cmd_notifiers))
-            self.application.add_handler(CommandHandler("alarm", self.cmd_alarm))
-            self.application.add_handler(CommandHandler("camera", self.cmd_camera))
-            self.application.add_handler(CommandHandler("status", self.cmd_status))
-            self.application.add_handler(CommandHandler("help", self.cmd_help))
-            self.application.add_handler(CommandHandler("test_notifier", self.cmd_test_notifier))
+                # Callback query handler for inline keyboards
+                self.application.add_handler(CallbackQueryHandler(self.handle_callback))
             
-            # Callback query handler for inline keyboards
-            self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+                # Text handler for multi-step flows
+                self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
             
-            # Text handler for multi-step flows
-            self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
+                # Set bot commands menu
+                await self.set_bot_commands()
             
-            # Set bot commands menu
-            await self.set_bot_commands()
-            
-            logger.info("Telegram bot initialized successfully with all handlers")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to initialize Telegram bot: {e}", exc_info=True)
-            return False
+                logger.info("Telegram bot initialized successfully with all handlers")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to initialize Telegram bot: {e}", exc_info=True)
+                return False
 
     async def set_bot_commands(self):
         """Set the bot command menu (like Hermes)."""
@@ -132,14 +132,19 @@ class SuperGuardTelegramBot:
         if not self.application:
             logger.error("Cannot start: application not initialized")
             return
-            
+        
         logger.info("Starting Telegram bot application...")
+        
+        # Properly initialize and start the application
         await self.application.initialize()
         await self.application.start()
         
-        # Start polling in background (don't await - runs forever)
+        # Initialize and start polling - RUN IN BACKGROUND but keep reference
         self._polling_task = asyncio.create_task(
-            self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            self.application.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True
+            )
         )
         logger.info("Telegram bot polling started successfully")
 
@@ -467,6 +472,10 @@ class SuperGuardTelegramBot:
         state = self._get_state(chat_id)
         
         try:
+            # Route inline callbacks from notifications first
+            if await self._route_inline_callback(query, data):
+                return
+            
             if data == "menu:main":
                 await query.edit_message_text(
                     "📋 <b>Main Menu</b>\n\nSelect an option:",
@@ -680,6 +689,168 @@ class SuperGuardTelegramBot:
             await query.edit_message_text(
                 f"❌ Error: {str(e)}",
                 reply_markup=self.build_main_menu()
+            )
+
+    # ==================== ALARM/CAMERA INLINE CALLBACK HANDLERS ====================
+
+    async def _route_inline_callback(self, query, data: str):
+        """Route inline callbacks for alarms and cameras from notifications."""
+        if data.startswith("alarm:ack:"):
+            alarm_id = data.replace("alarm:ack:", "")
+            await self._handle_alarm_ack(query, alarm_id)
+        elif data.startswith("alarm:silence:"):
+            alarm_id = data.replace("alarm:silence:", "")
+            await self._handle_alarm_silence(query, alarm_id)
+        elif data.startswith("camera:view:"):
+            camera_id = data.replace("camera:view:", "")
+            await self._handle_camera_view(query, camera_id)
+        else:
+            return False
+        return True
+
+    # ==================== ALARM CALLBACK HANDLERS ====================
+
+    async def _handle_alarm_ack(self, query, alarm_id: str):
+        """Handle alarm acknowledge callback."""
+        try:
+            import requests
+            from app.core.config import settings
+            
+            # Get auth token
+            auth_resp = requests.post(
+                f"http://{settings.host}:{settings.port}/api/v1/auth/login",
+                json={"username": "admin", "password": "BabaYaga#878"}
+            )
+            token = auth_resp.json()['access_token']
+            headers = {'Authorization': f'Bearer {token}'}
+            
+            # Acknowledge alarm via API
+            resp = requests.post(
+                f"http://{settings.host}:{settings.port}/api/v1/sites/00bab373-4b0b-4a82-899b-316b493f0935/alarms/{alarm_id}/ack",
+                headers=headers
+            )
+            
+            if resp.status_code == 200:
+                await query.edit_message_text(
+                    f"✅ <b>Alarm acknowledged</b>\n\nAlarm {alarm_id[:8]}... has been acknowledged.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back to Alarms", callback_data="alarm:list")
+                    ]])
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Failed to acknowledge alarm: {resp.text}",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back", callback_data="alarm:list")
+                    ]])
+                )
+        except Exception as e:
+            logger.error(f"Alarm ack error: {e}")
+            await query.edit_message_text(
+                f"❌ Error: {str(e)}",
+                reply_markup=self.build_alarm_menu()
+            )
+
+    async def _handle_alarm_silence(self, query, alarm_id: str):
+        """Handle alarm silence callback."""
+        try:
+            import requests
+            from app.core.config import settings
+            
+            auth_resp = requests.post(
+                f"http://{settings.host}:{settings.port}/api/v1/auth/login",
+                json={"username": "admin", "password": "BabaYaga#878"}
+            )
+            token = auth_resp.json()['access_token']
+            headers = {'Authorization': f'Bearer {token}'}
+            
+            resp = requests.post(
+                f"http://{settings.host}:{settings.port}/api/v1/sites/00bab373-4b0b-4a82-899b-316b493f0935/alarms/{alarm_id}/silence",
+                headers=headers
+            )
+            
+            if resp.status_code == 200:
+                await query.edit_message_text(
+                    f"🔕 <b>Alarm silenced</b>\n\nAlarm {alarm_id[:8]}... has been silenced.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back to Alarms", callback_data="alarm:list")
+                    ]])
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Failed to silence alarm: {resp.text}",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back", callback_data="alarm:list")
+                    ]])
+                )
+        except Exception as e:
+            logger.error(f"Alarm silence error: {e}")
+            await query.edit_message_text(
+                f"❌ Error: {str(e)}",
+                reply_markup=self.build_alarm_menu()
+            )
+
+    async def _handle_camera_view(self, query, camera_id: str):
+        """Handle camera view callback."""
+        try:
+            import requests
+            from app.core.config import settings
+            from app.models.models import Camera
+            from app.core.database import get_db
+            from sqlalchemy import select
+            
+            # Get camera name
+            async for db in get_db():
+                result = await db.execute(select(Camera).where(Camera.id == camera_id))
+                camera = result.scalar_one_or_none()
+                break
+            
+            camera_name = camera.name if camera else camera_id[:8]
+            
+            auth_resp = requests.post(
+                f"http://{settings.host}:{settings.port}/api/v1/auth/login",
+                json={"username": "admin", "password": "BabaYaga#878"}
+            )
+            token = auth_resp.json()['access_token']
+            headers = {'Authorization': f'Bearer {token}'}
+            
+            # Get camera stream info
+            resp = requests.get(
+                f"http://{settings.host}:{settings.port}/api/v1/sites/00bab373-4b0b-4a82-899b-316b493f0935/cameras/{camera_id}",
+                headers=headers
+            )
+            
+            if resp.status_code == 200:
+                cam_data = resp.json()
+                stream_url = cam_data.get('stream_url', 'Unknown')
+                
+                keyboard = [
+                    [InlineKeyboardButton("🔄 Refresh", callback_data=f"camera:view:{camera_id}")],
+                    [InlineKeyboardButton("🔙 Back to Cameras", callback_data="camera:list")]
+                ]
+                
+                await query.edit_message_text(
+                    f"📷 <b>Camera View</b>\n\n"
+                    f"<b>Camera:</b> {camera_name}\n"
+                    f"<b>Stream:</b> <code>{stream_url}</code>\n\n"
+                    f"Open the stream URL in VLC or a browser to view live feed.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Failed to get camera info",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back", callback_data="camera:list")
+                    ]])
+                )
+        except Exception as e:
+            logger.error(f"Camera view error: {e}")
+            await query.edit_message_text(
+                f"❌ Error: {str(e)}",
+                reply_markup=self.build_camera_menu()
             )
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -935,7 +1106,12 @@ async def start_telegram_bot():
     """Start the telegram bot (call from lifespan)."""
     bot = await get_telegram_bot()
     if bot and bot.application:
-        await bot.start()
+        # Only start if not already running
+        if not bot.application.running:
+            await bot.start()
+        # Wait a bit for polling to fully start
+        import asyncio
+        await asyncio.sleep(1)
     return bot
 
 

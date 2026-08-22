@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -7,11 +7,12 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Plus, RefreshCw, Power, Loader2, Wifi, WifiOff, Zap, Shield, RotateCcw, AlertTriangle, CheckCircle, XCircle, Search } from 'lucide-react';
+import { Plus, Power, Loader2, Wifi, Zap, Shield, RotateCcw, CheckCircle, XCircle, Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import { useActuators, type Actuator } from '@/hooks/useApiData';
 import { api } from '@/api/api';
+import { useActuatorWebSocket } from '@/hooks/useWebSocket';
 
 type Timeout = ReturnType<typeof setTimeout>;
 
@@ -28,9 +29,31 @@ export default function Actuators() {
   const { t } = useTranslation('actuators');
   const { siteId } = useParams<{ siteId: string }>();
   const { actuators, loading, error, refetch, createActuator, updateActuator, commandActuator, deleteActuator } = useActuators(siteId || '');
-  
+
+  // Suppress unused variable warnings
+  void loading; void error; void refetch;
+
+  // WebSocket handler for real-time actuator status updates
+  const handleActuatorUpdate = useCallback((msg: any) => {
+    const payload = msg.payload;
+    if (payload.actuatorId && payload.state !== undefined) {
+      setActuatorStates(prev => ({
+        ...prev,
+        [payload.actuatorId]: {
+          ...prev[payload.actuatorId]!,
+          isOnline: true,
+          lastStatus: payload.state,
+          lastSeen: new Date().toISOString(),
+          testState: 'idle'
+        }
+      }));
+    }
+  }, []);
+
+  // WebSocket for real-time actuator status - replaces polling
+  useActuatorWebSocket(siteId || '', handleActuatorUpdate);
+
   const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [isEditOpen, setIsEditOpen] = useState(false);
   const [editingActuator, setEditingActuator] = useState<Actuator | null>(null);
   const [formData, setFormData] = useState({
     name: '',
@@ -41,11 +64,9 @@ export default function Actuators() {
   });
   const [submitting, setSubmitting] = useState(false);
   const [actuatorStates, setActuatorStates] = useState<Record<string, ActuatorState>>({});
-  const [pollingActive, setPollingActive] = useState(true);
-  const pollIntervalRef = useRef<Timeout | null>(null);
   const repairTimeoutRef = useRef<Record<string, Timeout>>({});
 
-  // Initialize actuator states
+  // Initialize actuator states from API data
   useEffect(() => {
     setActuatorStates(prev => {
       const next = { ...prev };
@@ -73,44 +94,14 @@ export default function Actuators() {
     });
   }, [actuators]);
 
-  // Polling every 60 seconds
+  // Polling disabled - WebSocket handles real-time updates
+  // Kept for fallback if WebSocket fails
+  /*
   useEffect(() => {
     if (!pollingActive) return;
-    
-    const poll = async () => {
-      try {
-        const data = await api.getActuators(siteId || '');
-        // Update states from API
-        setActuatorStates(prev => {
-          const next = { ...prev };
-          data.forEach((actuator: Actuator) => {
-            const wasOnline = next[actuator.id]?.isOnline ?? false;
-            const isOnline = actuator.is_online;
-            
-            next[actuator.id] = {
-              ...next[actuator.id],
-              id: actuator.id,
-              isOnline,
-              lastStatus: actuator.last_status,
-              lastSeen: actuator.last_seen,
-              // If just came online, reset test state
-              testState: !wasOnline && isOnline ? 'idle' : next[actuator.id]?.testState || 'idle',
-            };
-          });
-          return next;
-        });
-      } catch (err) {
-        console.error('Polling error:', err);
-      }
-    };
-
-    poll(); // Initial poll
-    pollIntervalRef.current = setInterval(poll, 60000); // Every 60 seconds
-    
-    return () => {
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
-    };
+    // ...
   }, [siteId, pollingActive]);
+  */
 
   // Handle OFFLINE actuator repair every 2 minutes
   useEffect(() => {
@@ -118,7 +109,7 @@ export default function Actuators() {
       try {
         const data = await api.getActuators(siteId || '');
         const offlineActuators = data.filter((a: Actuator) => !a.is_online && a.is_enabled);
-        
+
         for (const actuator of offlineActuators) {
           const state = actuatorStates[actuator.id];
           // Only attempt repair if not already in repair state
@@ -136,70 +127,57 @@ export default function Actuators() {
   }, [siteId, actuatorStates]);
 
   const attemptRepair = async (actuator: Actuator) => {
-      const config = actuator.config || {};
-      const mac = config.mac;
-      if (!mac) return;
+    const config = actuator.config || {};
+    const mac = config.mac;
+    if (!mac) return;
 
-      setActuatorStates(prev => ({
-        ...prev,
-        [actuator.id]: { ...prev[actuator.id]!, testState: 'repair' }
-      }));
+    setActuatorStates(prev => ({
+      ...prev,
+      [actuator.id]: { ...prev[actuator.id]!, testState: 'repair' }
+    }));
 
-      try {
-        // Search for new IP by MAC
-        const newIp = await api.findDeviceByMac(siteId || '', mac);
-        if (newIp) {
-          // Update actuator config with new IP
-          await api.updateActuator(siteId || '', actuator.id, {
-            config: { ...config, ip: newIp }
-          });
+    try {
+      // Search for new IP by MAC
+      const newIp = await api.findDeviceByMac(siteId || '', mac);
+      if (newIp) {
+        // Update actuator config with new IP
+        await api.updateActuator(siteId || '', actuator.id, {
+          config: { ...config, ip: newIp }
+        });
 
-          // Test connection
-          const testResult = await api.testActuator(siteId || '', actuator.id);
-          // API returns { status: 'ok'|'offline', details: { online: boolean, ... } }
-          const isOnline = testResult.details?.online === true;
-          if (isOnline) {
-            // Success - will be picked up by next poll
+        // Test connection
+        const testResult = await api.testActuator(siteId || '', actuator.id);
+        // API returns { status: 'ok'|'offline', details: { online: boolean, ... } }
+        const isOnline = testResult.details?.online === true;
+        if (isOnline) {
+          // Success - will be picked up by next poll
+          setActuatorStates(prev => ({
+            ...prev,
+            [actuator.id]: { ...prev[actuator.id]!, testState: 'success', lastTestTime: Date.now() }
+          }));
+
+          // Reset to idle after 5 seconds
+          setTimeout(() => {
             setActuatorStates(prev => ({
               ...prev,
-              [actuator.id]: { ...prev[actuator.id]!, testState: 'success', lastTestTime: Date.now() }
+              [actuator.id]: { ...prev[actuator.id]!, testState: 'idle' }
             }));
-
-            // Reset to idle after 5 seconds
-            setTimeout(() => {
-              setActuatorStates(prev => ({
-                ...prev,
-                [actuator.id]: { ...prev[actuator.id]!, testState: 'idle' }
-              }));
-            }, 5000);
-          } else {
-            // Repair test failed
-            setActuatorStates(prev => ({
-              ...prev,
-              [actuator.id]: { ...prev[actuator.id]!, testState: 'fail', lastTestTime: Date.now() }
-            }));
-
-            // Send Telegram alert
-            await api.sendTelegramAlert(siteId || '', {
-              type: 'actuator_offline',
-              actuatorId: actuator.id,
-              actuatorName: actuator.name,
-              message: `Actuator ${actuator.name} is OFFLINE after repair attempt`
-            });
-
-            setTimeout(() => {
-              setActuatorStates(prev => ({
-                ...prev,
-                [actuator.id]: { ...prev[actuator.id]!, testState: 'idle' }
-              }));
-            }, 5000);
-          }
+          }, 5000);
         } else {
-          // MAC not found
+          // Repair test failed
           setActuatorStates(prev => ({
             ...prev,
             [actuator.id]: { ...prev[actuator.id]!, testState: 'fail', lastTestTime: Date.now() }
           }));
+
+          // Send Telegram alert
+          await api.sendTelegramAlert(siteId || '', {
+            type: 'actuator_offline',
+            actuatorId: actuator.id,
+            actuatorName: actuator.name,
+            message: `Actuator ${actuator.name} is OFFLINE after repair attempt`
+          });
+
           setTimeout(() => {
             setActuatorStates(prev => ({
               ...prev,
@@ -207,7 +185,20 @@ export default function Actuators() {
             }));
           }, 5000);
         }
-      } catch (err) {
+      } else {
+        // MAC not found
+        setActuatorStates(prev => ({
+          ...prev,
+          [actuator.id]: { ...prev[actuator.id]!, testState: 'fail', lastTestTime: Date.now() }
+        }));
+        setTimeout(() => {
+          setActuatorStates(prev => ({
+            ...prev,
+            [actuator.id]: { ...prev[actuator.id]!, testState: 'idle' }
+          }));
+        }, 5000);
+      }
+    } catch (err) {
       console.error('Repair error:', err);
       setActuatorStates(prev => ({
         ...prev,
@@ -222,6 +213,10 @@ export default function Actuators() {
     }
   };
 
+  const handleTypeChange = (type: string) => {
+    setFormData(prev => ({ ...prev, type, config: {} }));
+  };
+
   const handleTest = async (actuator: Actuator) => {
     const state = actuatorStates[actuator.id];
     if (state?.testState === 'testing' || state?.testState === 'repair') return;
@@ -233,10 +228,10 @@ export default function Actuators() {
 
     try {
       const result = await api.testActuator(siteId || '', actuator.id);
-      
+
       // API returns { status: 'ok'|'offline', details: { online: boolean, ... } }
       const isOnline = result.details?.online === true;
-      
+
       if (isOnline) {
         setActuatorStates(prev => ({
           ...prev,
@@ -254,13 +249,13 @@ export default function Actuators() {
           ...prev,
           [actuator.id]: { ...prev[actuator.id]!, testState: 'repair' }
         }));
-        
+
         // 2 minute repair timeout
         const timeout = setTimeout(() => {
           handleRepairTimeout(actuator);
         }, 120000);
         repairTimeoutRef.current[actuator.id] = timeout;
-        
+
         await attemptRepair(actuator);
       }
     } catch (err) {
@@ -282,7 +277,7 @@ export default function Actuators() {
       ...prev,
       [actuator.id]: { ...prev[actuator.id]!, testState: 'fail', lastTestTime: Date.now() }
     }));
-    
+
     // Send Telegram alert
     try {
       await api.sendTelegramAlert(siteId || '', {
@@ -294,7 +289,7 @@ export default function Actuators() {
     } catch (err) {
       console.error('Telegram alert failed:', err);
     }
-    
+
     setTimeout(() => {
       setActuatorStates(prev => ({
         ...prev,
@@ -306,7 +301,7 @@ export default function Actuators() {
   const handleToggle = async (actuator: Actuator) => {
     const currentStatus = actuatorStates[actuator.id]?.lastStatus ?? actuator.last_status;
     const newAction = currentStatus ? 'off' : 'on';
-    
+
     setActuatorStates(prev => ({
       ...prev,
       [actuator.id]: { ...prev[actuator.id]!, lastStatus: !currentStatus }
@@ -314,15 +309,15 @@ export default function Actuators() {
 
     try {
       await commandActuator(actuator.id, { action: newAction });
-      
+
       // Wait 3 seconds then verify
       setTimeout(async () => {
         try {
           const data = await api.getActuator(siteId || '', actuator.id);
           setActuatorStates(prev => ({
             ...prev,
-            [actuator.id]: { 
-              ...prev[actuator.id]!, 
+            [actuator.id]: {
+              ...prev[actuator.id]!,
               lastStatus: data.last_status,
               isOnline: data.is_online,
               lastSeen: data.last_seen
@@ -353,7 +348,7 @@ export default function Actuators() {
 
   const getTestButtonProps = (actuator: Actuator) => {
     const state = actuatorStates[actuator.id]?.testState || 'idle';
-    
+
     switch (state) {
       case 'testing':
         return {
@@ -429,7 +424,6 @@ export default function Actuators() {
     });
     setEditingActuator(null);
     setIsCreateOpen(false);
-    setIsEditOpen(false);
   };
 
   const openCreate = () => {
@@ -446,7 +440,7 @@ export default function Actuators() {
       is_enabled: actuator.is_enabled,
     });
     setEditingActuator(actuator);
-    setIsEditOpen(true);
+    setIsCreateOpen(true);
   };
 
   const renderConfigFields = (type: string, config: Record<string, any>, onChange: (key: string, value: any) => void) => {
@@ -488,6 +482,116 @@ export default function Actuators() {
             </div>
           </div>
         );
+      case 'sonoff':
+        return (
+          <div className="grid gap-4 grid-cols-2">
+            {['ip', 'device_id', 'sonoff_apikey'].map(key => (
+              <div key={key} className="space-y-2">
+                <Label htmlFor={`config_${key}`}>{key.replace('_', ' ')}</Label>
+                <Input
+                  id={`config_${key}`}
+                  value={config[key] || ''}
+                  onChange={(e) => onChange(key, e.target.value)}
+                />
+              </div>
+            ))}
+            <div className="space-y-2">
+              <Label htmlFor="config_port">Port</Label>
+              <Input
+                id="config_port"
+                type="number"
+                value={config.port || 8081}
+                onChange={(e) => onChange('port', parseInt(e.target.value))}
+                defaultValue={8081}
+              />
+            </div>
+          </div>
+        );
+      case 'shelly':
+        return (
+          <div className="grid gap-4 grid-cols-2">
+            {['ip', 'shelly_auth_key'].map(key => (
+              <div key={key} className="space-y-2">
+                <Label htmlFor={`config_${key}`}>{key.replace('_', ' ')}</Label>
+                <Input
+                  id={`config_${key}`}
+                  value={config[key] || ''}
+                  onChange={(e) => onChange(key, e.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+        );
+      case 'tasmota':
+        return (
+          <div className="grid gap-4 grid-cols-2">
+            {['ip', 'tasmota_username', 'tasmota_password'].map(key => (
+              <div key={key} className="space-y-2">
+                <Label htmlFor={`config_${key}`}>{key.replace('_', ' ')}</Label>
+                <Input
+                  id={`config_${key}`}
+                  type={key.includes('password') ? 'password' : 'text'}
+                  value={config[key] || ''}
+                  onChange={(e) => onChange(key, e.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+        );
+      case 'mqtt':
+        return (
+          <div className="grid gap-4 grid-cols-2">
+            {['mqtt_broker', 'mqtt_topic', 'mqtt_username', 'mqtt_password'].map(key => (
+              <div key={key} className="space-y-2">
+                <Label htmlFor={`config_${key}`}>{key.replace('_', ' ')}</Label>
+                <Input
+                  id={`config_${key}`}
+                  type={key.includes('password') ? 'password' : 'text'}
+                  value={config[key] || ''}
+                  onChange={(e) => onChange(key, e.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+        );
+      case 'http':
+        return (
+          <div className="grid gap-4 grid-cols-2">
+            {['http_on_url', 'http_off_url', 'http_status_url'].map(key => (
+              <div key={key} className="space-y-2">
+                <Label htmlFor={`config_${key}`}>{key.replace('_', ' ')}</Label>
+                <Input
+                  id={`config_${key}`}
+                  value={config[key] || ''}
+                  onChange={(e) => onChange(key, e.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+        );
+      case 'gpio':
+        return (
+          <div className="grid gap-4 grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="config_gpio_pin">GPIO Pin</Label>
+              <Input
+                id="config_gpio_pin"
+                type="number"
+                value={config.gpio_pin || -1}
+                onChange={(e) => onChange('gpio_pin', parseInt(e.target.value))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="config_gpio_active_low">Active Low</Label>
+              <Input
+                id="config_gpio_active_low"
+                type="checkbox"
+                checked={config.gpio_active_low || false}
+                onChange={(e) => onChange('gpio_active_low', e.target.checked)}
+              />
+            </div>
+          </div>
+        );
       default:
         return (
           <Textarea
@@ -498,228 +602,230 @@ export default function Actuators() {
               } catch {
               }
             }}
-            rows={6}
-            className="font-mono text-sm"
-            placeholder="{}"
+            placeholder="JSON config"
+            className="min-h-[120px] font-mono text-sm"
           />
         );
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="h-12 w-12 animate-spin text-primary" />
-      </div>
-    );
-  }
+  const handleConfigChange = (key: string, value: any) => {
+    setFormData(prev => ({
+      ...prev,
+      config: { ...prev.config, [key]: value }
+    }));
+  };
 
-  if (error) {
-    return (
-      <Card>
-        <CardContent className="py-12 text-center">
-          <svg className="w-12 h-12 mx-auto text-destructive mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-          </svg>
-          <p className="text-destructive">{t('errorLoading')}: {error}</p>
-          <Button variant="outline" onClick={refetch} className="mt-4">
-            <RefreshCw className="w-4 h-4 mr-2" />
-            {t('retry')}
-          </Button>
-        </CardContent>
-      </Card>
-    );
-  }
+  const handleDelete = async (actuatorId: string) => {
+    if (!confirm(t('confirm_delete'))) return;
+    try {
+      await deleteActuator(actuatorId);
+      setActuatorStates(prev => {
+        const next = { ...prev };
+        delete next[actuatorId];
+        return next;
+      });
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
 
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center mb-4">
-        <h2 className="text-xl font-bold">{t('title')}</h2>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setPollingActive(!pollingActive)}>
-            {pollingActive ? <RotateCcw className="w-4 h-4 mr-1" /> : <RotateCcw className="w-4 h-4 mr-1" />}
-            {pollingActive ? t('pausePolling') : t('resumePolling')}
-          </Button>
-          <Button onClick={openCreate}>
-            <Plus className="w-4 h-4 mr-2" />
-            {t('addActuator')}
-          </Button>
+    <div className="p-6 space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">{t('title')}</h1>
+          <p className="text-muted-foreground">{t('description')}</p>
         </div>
+        <Button onClick={openCreate} className="gap-2">
+          <Plus className="w-4 h-4" />
+          {t('add_actuator')}
+        </Button>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {actuators.map((actuator) => {
-          const state = actuatorStates[actuator.id];
-          const isOnline = state?.isOnline ?? actuator.is_online;
-          const lastStatus = state?.lastStatus ?? actuator.last_status;
-          const testState = state?.testState || 'idle';
-          
-          const isOn = lastStatus === true;
-          
+      {/* Actuators Grid */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {actuators.map(actuator => {
+          const state = actuatorStates[actuator.id] || {
+            id: actuator.id,
+            isOnline: actuator.is_online,
+            lastStatus: actuator.last_status,
+            lastSeen: actuator.last_seen,
+            testState: 'idle',
+            lastTestTime: null,
+          };
+
+          const isOnline = state.isOnline;
+
           return (
-            <Card key={actuator.id} className="h-full">
-              <CardHeader>
-                <CardTitle className="flex items-center justify-between">
-                  <span>{actuator.name}</span>
-                  <Badge variant="secondary" className="flex items-center gap-1">
-                    {getTypeIcon(actuator.type)}
-                    {actuator.type.toUpperCase()}
-                  </Badge>
-                </CardTitle>
-                <CardDescription>{actuator.description || t('noDescription')}</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
+            <Card key={actuator.id} className="relative overflow-hidden">
+              {/* Online status indicator */}
+              <div className={`absolute top-2 right-2 ${isOnline ? 'text-green-500' : 'text-red-500'}`}>
+                <Wifi className={isOnline ? 'w-5 h-5' : 'w-5 h-5 opacity-50'} />
+              </div>
+
+              <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-muted-foreground">{t('status')}</span>
-                  <Badge variant={isOnline ? 'success' : 'destructive'} className="flex items-center gap-1">
-                    {isOnline ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-                    {isOnline ? t('online') : t('offline')}
+                  <CardTitle className="text-lg">{actuator.name}</CardTitle>
+                  <Badge variant={actuator.is_enabled ? 'default' : 'secondary'}>
+                    {getTypeIcon(actuator.type)}
                   </Badge>
                 </div>
-                
-                {/* Main Toggle Button */}
-                <Button
-                  variant={isOn ? 'default' : 'destructive'}
-                  className={`w-full py-3 text-lg font-medium ${isOn ? 'bg-green-500 hover:bg-green-600 text-white' : 'bg-red-500 hover:bg-red-600 text-white'}`}
-                  disabled={!actuator.is_enabled || testState === 'testing' || testState === 'repair'}
-                  onClick={() => handleToggle(actuator)}
-                >
-                  <Power className={`w-5 h-5 mr-2 ${isOn ? '' : ''}`} />
-                  {isOn ? t('on') : t('off')}
-                </Button>
-                
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">{t('lastSeen')}</span>
-                  <span className="text-muted-foreground">
-                    {state?.lastSeen ? new Date(state.lastSeen).toLocaleString() : (actuator.last_seen ? new Date(actuator.last_seen).toLocaleString() : '—')}
-                  </span>
+                <CardDescription>{actuator.description || t('no_description')}</CardDescription>
+              </CardHeader>
+
+              <CardContent className="space-y-4">
+                {/* Status Row */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    {isOnline ? (
+                      <span className="flex items-center gap-1 text-green-600">
+                        <CheckCircle className="w-4 h-4" /> {t('online')}
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1 text-red-600">
+                        <XCircle className="w-4 h-4" /> {t('offline')}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    {state.lastStatus !== null && (
+                      <>
+                        {t('status')}: <span className={state.lastStatus ? 'text-green-600' : 'text-red-600'}>
+                          {state.lastStatus ? t('on') : t('off')}
+                        </span>
+                      </>
+                    )}
+                    {state.lastSeen && (
+                      <>
+                        {t('last_seen')}: <time>{new Date(state.lastSeen).toLocaleString()}</time>
+                      </>
+                    )}
+                  </div>
                 </div>
-                
-                <div className="flex gap-2 pt-2 border-t">
+
+                {/* Test/Repair State */}
+                <div className="flex items-center gap-2">
+                  {state.testState !== 'idle' && (
+                    <Badge variant={
+                      state.testState === 'testing' ? 'outline' :
+                      state.testState === 'success' ? 'default' :
+                      state.testState === 'repair' ? 'default' :
+                      state.testState === 'fail' ? 'destructive' :
+                      'outline'
+                    } className="flex-1">
+                      {state.testState === 'testing' && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+                      {state.testState === 'success' && <CheckCircle className="w-3 h-3 mr-1" />}
+                      {state.testState === 'repair' && <RotateCcw className="w-3 h-3 mr-1 animate-spin" />}
+                      {state.testState === 'fail' && <XCircle className="w-3 h-3 mr-1" />}
+                      {t(state.testState)}
+                    </Badge>
+                  )}
+                </div>
+
+                {/* Action Buttons */}
+                <div className="grid grid-cols-2 gap-2">
                   <Button
                     {...getTestButtonProps(actuator)}
-                    size="sm"
                   />
                   <Button
                     variant="outline"
-                    size="sm"
-                    className="flex-1"
-                    onClick={() => openEdit(actuator)}
-                    disabled={testState === 'testing' || testState === 'repair'}
+                    onClick={() => handleToggle(actuator)}
+                    disabled={!actuator.is_enabled}
+                    className={state.lastStatus ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}
                   >
-                    <Zap className="w-4 h-4 mr-1" />
-                    {t('edit')}
+                    <Power className="w-4 h-4 mr-1" />
+                    {state.lastStatus ? t('turn_off') : t('turn_on')}
                   </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    className="flex-1"
-                    onClick={() => {
-                      if (confirm(`${t('confirmDelete') || 'Delete this actuator?'}`)) {
-                        deleteActuator(actuator.id);
-                      }
-                    }}
-                    disabled={testState === 'testing' || testState === 'repair'}
-                  >
-                    <AlertTriangle className="w-4 h-4 mr-1" />
-                    {t('delete')}
+                </div>
+
+                {/* Edit/Delete */}
+                <div className="flex justify-end gap-2 pt-2 border-t">
+                  <Button variant="ghost" size="sm" onClick={() => openEdit(actuator)}>
+                    <Search className="w-4 h-4 mr-1" /> {t('edit')}
+                  </Button>
+                  <Button variant="ghost" size="sm" className="text-destructive" onClick={() => handleDelete(actuator.id)}>
+                    <XCircle className="w-4 h-4 mr-1" /> {t('delete')}
                   </Button>
                 </div>
               </CardContent>
             </Card>
           );
         })}
-        {actuators.length === 0 && (
-          <Card className="col-span-full">
-            <CardContent className="py-12 text-center text-muted-foreground">
-              <Power className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              <p>{t('noActuators') || 'No actuators configured. Add your first actuator.'}</p>
-            </CardContent>
-          </Card>
-        )}
       </div>
 
+      {/* Empty State */}
+      {actuators.length === 0 && (
+        <Card className="text-center py-12">
+          <CardContent>
+            <Shield className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+            <h3 className="text-lg font-medium">{t('no_actuators')}</h3>
+            <p className="text-muted-foreground mb-4">{t('no_actuators_desc')}</p>
+            <Button onClick={openCreate}>
+              <Plus className="w-4 h-4 mr-2" />
+              {t('add_first_actuator')}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Create/Edit Dialog */}
-      <Dialog open={isCreateOpen || isEditOpen} onOpenChange={(open) => { if (!open) resetForm(); }}>
-        <DialogContent className="max-w-2xl">
+      <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{editingActuator ? t('editActuator') : t('addActuator')}</DialogTitle>
-            <DialogDescription>{editingActuator ? t('editActuatorDescription') : t('addActuatorDescription')}</DialogDescription>
+            <DialogTitle>{editingActuator ? t('edit_actuator') : t('create_actuator')}</DialogTitle>
+            <DialogDescription>{t('actuator_form_desc')}</DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleSubmit}>
-            <div className="space-y-4 py-4">
-              <div className="grid gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="name">{t('name')}</Label>
-                  <Input
-                    id="name"
-                    value={formData.name}
-                    onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                    placeholder={t('actuatorNamePlaceholder')}
-                    required
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="description">{t('description')}</Label>
-                  <Textarea
-                    id="description"
-                    value={formData.description}
-                    onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
-                    placeholder={t('descriptionPlaceholder')}
-                    rows={2}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="type">{t('type')}</Label>
-                  <Select value={formData.type} onValueChange={(value) => setFormData(prev => ({ ...prev, type: value, config: {} }))}>
-                    <SelectTrigger id="type">
-                      <SelectValue placeholder={t('selectType')} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="tuya">Tuya Smart</SelectItem>
-                      <SelectItem value="sonoff">Sonoff</SelectItem>
-                      <SelectItem value="shelly">Shelly</SelectItem>
-                      <SelectItem value="tasmota">Tasmota</SelectItem>
-                      <SelectItem value="gpio">GPIO</SelectItem>
-                      <SelectItem value="mqtt">MQTT</SelectItem>
-                      <SelectItem value="http">HTTP</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>{t('config')}</Label>
-                  {renderConfigFields(formData.type, formData.config, (key, value) => {
-                    setFormData(prev => ({ ...prev, config: { ...prev.config, [key]: value } }));
-                  })}
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    id="is_enabled"
-                    checked={formData.is_enabled}
-                    onChange={(e) => setFormData(prev => ({ ...prev, is_enabled: e.target.checked }))}
-                    className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-                  />
-                  <Label htmlFor="is_enabled">{t('enabled')}</Label>
-                </div>
+          <form onSubmit={handleSubmit} className="space-y-6 p-4">
+            <div className="grid gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="name">{t('name')}</Label>
+                <Input id="name" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} required />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="description">{t('description')}</Label>
+                <Textarea id="description" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} rows={3} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="type">{t('type')}</Label>
+                <Select value={formData.type} onValueChange={handleTypeChange}>
+                  <SelectTrigger><SelectValue placeholder={t('select_type')} /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="tuya">Tuya / SmartLife</SelectItem>
+                    <SelectItem value="sonoff">Sonoff (eWeLink)</SelectItem>
+                    <SelectItem value="shelly">Shelly</SelectItem>
+                    <SelectItem value="tasmota">Tasmota</SelectItem>
+                    <SelectItem value="gpio">GPIO (Raspberry Pi)</SelectItem>
+                    <SelectItem value="mqtt">MQTT</SelectItem>
+                    <SelectItem value="http">HTTP REST</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="is_enabled">{t('enabled')}</Label>
+                <Input
+                  id="is_enabled"
+                  type="checkbox"
+                  checked={formData.is_enabled}
+                  onChange={e => setFormData({...formData, is_enabled: e.target.checked})}
+                />
               </div>
             </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={resetForm}>
-                {t('cancel')}
-              </Button>
-              <Button type="submit" disabled={submitting}>
-                {submitting ? (
-                  <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    {t('saving')}
-                  </>
-                ) : (
-                  t('save')
-                )}
-              </Button>
-            </DialogFooter>
-            </form>
+
+            {/* Config Fields */}
+            <div className="space-y-2 border-t pt-4">
+              <h4 className="font-medium">{t('configuration')}</h4>
+              {renderConfigFields(formData.type, formData.config, handleConfigChange)}
+            </div>
+          </form>
+          <DialogFooter className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={resetForm}>{t('cancel')}</Button>
+            <Button type="submit" disabled={submitting}>
+              {submitting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : ''} {t('save')}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
 
     # Encryption for sensitive actuator config (local_key, passwords)
-    encryption_key: str = ""
+    encryption_key: str = Field(default="", alias="SG_ENC_KEY")
 
     # CORS
     cors_origins: List[str] = Field(

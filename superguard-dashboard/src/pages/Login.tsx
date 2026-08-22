@@ -14,7 +14,7 @@ export default function Login() {
   const navigate = useNavigate();
   const { login, loading: authLoading } = useAuth();
   
-  const [email, setEmail] = useState('admin@example.com');
+  const [email, setEmail] = useState('admin');
   const [password, setPassword] = useState('admin123');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,7 +110,7 @@ export default function Login() {
         </CardContent>
         <CardFooter className="flex flex-col space-y-2 text-center text-sm text-muted-foreground">
           <p>{t('defaultCredentials')}</p>
-          <code className="px-2 py-1 bg-muted rounded">admin@example.com / admin123</code>
+          <code className="px-2 py-1 bg-muted rounded">admin / BabaYaga#878</code>
         </CardFooter>
       </Card>
     </div>

@@ -5,10 +5,14 @@ Integrates superguard/detectors pipeline with FastAPI background tasks.
 Runs continuous detection on all enabled cameras, triggers alarms via WS.
 """
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 import time
 import threading
 import sys
 import base64
+import io
 from typing import Optional, Dict, List, Any, Union
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +23,9 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.models import Camera, Detector, ActuatorBinding, Actuator, Alarm, AlarmState
 from sqlalchemy import select
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 
 
 # ============================================================================
@@ -163,6 +170,10 @@ class DetectionPipeline:
             if self.target.classes and det['class'] not in self.target.classes:
                 continue
             
+            # Zone filter
+            if self.zone_filter and not self.zone_filter.check(frame.shape, det['bbox']):
+                continue
+            
             # Color filter
             color_frac = self.color_filter.filter(frame, det['bbox'])
             if color_frac < self.min_color_fraction:
@@ -189,7 +200,7 @@ class DetectionPipeline:
 
 
 def parse_target_text(text: str) -> Target:
-    """Parse target text like 'car yellow zone 9' into Target object."""
+    """Parse target text like 'car red zone 5' into Target object."""
     target = Target()
     parts = text.lower().split()
     
@@ -198,12 +209,22 @@ def parse_target_text(text: str) -> Target:
         'bus': 5, 'truck': 7
     }
     
-    for part in parts:
+    i = 0
+    while i < len(parts):
+        part = parts[i]
         if part in class_map:
             target.classes = [class_map[part]]
-        elif part.isdigit():
-            # zone cell
-            pass
+        elif part == 'red' or part == 'красный':
+            # Add red color ranges (HSV)
+            target.color_ranges = [
+                {'lower': [0, 100, 100], 'upper': [10, 255, 255]},
+                {'lower': [170, 100, 100], 'upper': [180, 255, 255]}
+            ]
+        elif part == 'zone' and i + 1 < len(parts) and parts[i + 1].isdigit():
+            # Zone cell number - stored in target description for reference
+            target.description = f"zone {parts[i + 1]}"
+            i += 1
+        i += 1
     
     return target
 
@@ -297,6 +318,12 @@ class DetectionEngine:
         
         if cfg.get('target'):
             target = parse_target_text(cfg['target'])
+            # Add red color ranges for "red car" target
+            if 'red' in cfg['target'].lower() or 'красн' in cfg['target'].lower():
+                target.color_ranges = [
+                    {'lower': [0, 100, 100], 'upper': [10, 255, 255]},
+                    {'lower': [170, 100, 100], 'upper': [180, 255, 255]}
+                ]
         
         # Create pipeline if we have detector
         pipeline = None
@@ -308,7 +335,7 @@ class DetectionEngine:
                     imgsz=640
                 ),
                 color_filter=ColorFilter(target.color_ranges if target and target.color_ranges else None),
-                zone_filter=ZoneFilter(),
+                zone_filter=ZoneFilter(zone.rows if zone else 3, zone.cols if zone else 3, zone.cell if zone else 5),
                 target=target if target else Target(),
                 min_color_fraction=self.yellow_min_fraction
             )
@@ -430,10 +457,10 @@ class DetectionEngine:
                     "matches": len(processed.matches),
                     "match_details": [
                         {
-                            "class": m.name,
-                            "confidence": m.confidence,
-                            "color_fraction": m.color_fraction,
-                            "box": m.box
+                            "class": m['class_name'],
+                            "confidence": m['conf'],
+                            "color_fraction": m['color_fraction'],
+                            "box": m['bbox']
                         }
                         for m in processed.matches
                     ],
@@ -463,16 +490,37 @@ class DetectionEngine:
         """Trigger alarm for camera."""
         state.alarm_active = True
         
-        # Create alarm record
+        # Build match details robustly
+        match_details = []
+        for m in processed.matches:
+            # Ensure all expected keys exist with defaults
+            cm = m if isinstance(m, dict) else {}
+            match_details.append({
+                "class_name": cm.get('class_name', 'unknown'),
+                "conf": float(cm.get('conf', 0.0)),
+                "color_fraction": float(cm.get('color_fraction', 0.0)),
+                "bbox": cm.get('bbox', [0, 0, 0, 0])
+            })
+        
+        # Create alarm record with robust field extraction
+        primary_match = match_details[0] if match_details else None
+        confidence = primary_match['conf'] if primary_match else None
+        detection_class = primary_match['class_name'] if primary_match else None
+        color_fraction = primary_match['color_fraction'] if primary_match else None
+        
         alarm = Alarm(
             camera_id=camera.id,
             site_id=camera.site_id,
             detector_id=state.detector_id,
             state=AlarmState.triggered,
+            confidence=confidence,
+            detection_class=detection_class,
+            color_fraction=color_fraction,
             alarm_metadata={
                 "matches": len(processed.matches),
                 "zone": str(state.zone) if state.zone else "full",
-                "target": state.target.description if state.target else "default"
+                "target": state.target.description if state.target else "default",
+                "match_details": match_details
             }
         )
         db.add(alarm)
@@ -492,12 +540,13 @@ class DetectionEngine:
                     "site_id": str(camera.site_id),
                     "timestamp": datetime.utcnow().isoformat(),
                     "matches": len(processed.matches),
+                    "match_details": match_details,
                     "annotated_frame": self._frame_to_base64(processed.annotated)
                 }
             })
         
-        # Send Telegram notification (async, don't wait)
-        asyncio.create_task(self._send_telegram_alarm(camera, processed.annotated, alarm.id))
+        # Send Telegram notification with inline keyboard (async, don't wait)
+        asyncio.create_task(self._send_telegram_alarm(camera, processed.annotated, alarm.id, match_details))
         
         await db.commit()
     
@@ -537,36 +586,81 @@ class DetectionEngine:
         await db.commit()
     
     async def _control_actuators(self, camera_id: str, on: bool):
-        """Control actuators bound to camera."""
-        actuator_names = self._actuator_bindings.get(camera_id, [])
-        if not actuator_names:
-            return
-        
-        async for db in get_db():
-            for name in actuator_names:
-                result = await db.execute(
-                    select(Actuator).where(
-                        Actuator.name == name,
-                        Actuator.is_enabled == True
+            """Control actuators bound to camera."""
+            actuator_names = self._actuator_bindings.get(camera_id, [])
+            if not actuator_names:
+                return
+
+            async for db in get_db():
+                for name in actuator_names:
+                    result = await db.execute(
+                        select(Actuator).where(
+                            Actuator.name == name,
+                            Actuator.is_enabled == True
+                        )
                     )
-                )
-                actuator = result.scalar_one_or_none()
-                if actuator:
-                    # Emit WS event that actuator manager will pick up
-                    if self.ws_manager and actuator.site_id:
-                        await self.ws_manager.broadcast(str(actuator.site_id), {
-                            "type": "actuator.command",
-                            "payload": {
-                                "actuator_id": actuator.id,
-                                "action": "on" if on else "off"
-                            }
-                        })
-            break
+                    actuator = result.scalar_one_or_none()
+                    if actuator:
+                        # Emit WS event that actuator manager will pick up
+                        if self.ws_manager and actuator.site_id:
+                            await self.ws_manager.broadcast(str(actuator.site_id), {
+                                "type": "actuator.command",
+                                "payload": {
+                                    "actuator_id": actuator.id,
+                                    "action": "on" if on else "off"
+                                }
+                            })
+                    
+                        # Also call actuator engine directly if available (for immediate execution)
+                        try:
+                            from app.main import app
+                            actuator_engine = getattr(app.state, 'actuator_engine', None)
+                            if actuator_engine:
+                                await actuator_engine.queue_command(actuator.id, "on" if on else "off")
+                        except Exception as e:
+                            logger.warning(f"Could not queue command to actuator engine: {e}")
+                break
     
-    async def _send_telegram_alarm(self, camera: Camera, frame: np.ndarray, alarm_id: str):
-        """Send alarm notification to Telegram."""
-        # TODO: Call Telegram bot API or send via message queue
-        pass
+    async def _send_telegram_alarm(self, camera: Camera, frame: np.ndarray, alarm_id: str, match_details: list):
+        """Send alarm notification to Telegram via bot."""
+        try:
+            from app.services.telegram_bot import get_telegram_bot
+            bot = await get_telegram_bot()
+            if bot and bot.application:
+                # Build caption with match details
+                caption = f"🚨 <b>ALARM TRIGGERED</b>\n\n"
+                caption += f"📷 <b>Camera:</b> {camera.name}\n"
+                caption += f"🕐 <b>Time:</b> {datetime.utcnow().strftime('%H:%M:%S')}\n\n"
+                
+                if match_details:
+                    caption += f"<b>Detections:</b>\n"
+                    for i, m in enumerate(match_details[:3], 1):  # Top 3 matches
+                        caption += f"  {i}. {m['class_name']} ({m['conf']:.2f}) - color: {m['color_fraction']:.2f}\n"
+                
+                caption += f"\n🆔 <code>{alarm_id}</code>"
+                
+                # Send photo with inline keyboard
+                import io
+                ok, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if ok:
+                    photo_bytes = io.BytesIO(buf.tobytes())
+                    photo_bytes.seek(0)
+                    
+                    keyboard = [
+                        [InlineKeyboardButton("✅ Acknowledge", callback_data=f"alarm:ack:{alarm_id}")],
+                        [InlineKeyboardButton("🔕 Silence", callback_data=f"alarm:silence:{alarm_id}")],
+                        [InlineKeyboardButton("📷 Camera View", callback_data=f"camera:view:{camera.id}")]
+                    ]
+                    
+                    await bot.application.bot.send_photo(
+                        chat_id=bot.chat_id,
+                        photo=photo_bytes,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+        except Exception as e:
+            print(f"[DetectionEngine] Telegram alarm send error: {e}")
     
     def _frame_to_base64(self, frame: np.ndarray) -> str:
         """Encode frame as base64 JPEG."""
@@ -586,12 +680,12 @@ class DetectionEngine:
             if camera and state and state.last_annotated_frame is not None:
                 # Create a minimal processed frame for trigger
                 processed = ProcessedFrame(
-                    original=state.last_annotated_frame,
+                    frame=state.last_annotated_frame,
                     annotated=state.last_annotated_frame,
-                    matches=[],  # Will be filled by pipeline
+                    detections=[],
+                    matches=[],
                     all_detections=[],
-                    timestamp=time.time(),
-                    camera_id=camera_id
+                    timestamp=time.time()
                 )
                 await self._trigger_alarm(db, camera, state, processed)
             break

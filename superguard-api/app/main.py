@@ -43,10 +43,17 @@ async def lifespan(app: FastAPI):
     app.state.camera_monitor = camera_monitor
     await camera_monitor.start(interval=60)  # Check every 60 seconds
 
-    # Start detection engine with Redis WS manager
-    from app.services.detection_engine import DetectionEngine
+    # Start Redis manager
     from app.services.redis_manager import get_redis_manager
     redis_manager = await get_redis_manager()
+
+    # Start actuator engine FIRST - needed by detection engine
+    from app.services.actuator_engine import get_actuator_engine
+    actuator_engine = await get_actuator_engine(redis_manager)
+    app.state.actuator_engine = actuator_engine
+
+    # Start detection engine with Redis WS manager
+    from app.services.detection_engine import DetectionEngine
     detection_engine = DetectionEngine(ws_manager=redis_manager)
     app.state.detection_engine = detection_engine
     app.state.redis_manager = redis_manager
@@ -62,11 +69,13 @@ async def lifespan(app: FastAPI):
         logger.warning("Telegram bot not started (token not configured or initialization failed)")
 
     yield
-    
+
     # Shutdown
     await actuator_monitor.stop()
     await camera_monitor.stop()
     app.state.detection_engine.stop()
+    from app.services.actuator_engine import close_actuator_engine
+    await close_actuator_engine()
     await stop_telegram_bot()
 
 

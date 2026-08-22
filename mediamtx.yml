@@ -1,0 +1,40 @@
+# MediaMTX Configuration for SuperGuard
+# RTSP/HLS/WebRTC streaming server (minimal valid config for v1.11+)
+
+# Global settings
+logLevel: info
+
+# API
+api: true
+apiAddress: 0.0.0.0:9997
+
+# Metrics
+metrics: true
+metricsAddress: 0.0.0.0:9997
+
+# RTSP
+rtsp: true
+rtspAddress: 0.0.0.0:8554
+
+# RTMP
+rtmp: true
+rtmpAddress: 0.0.0.0:1935
+
+# HLS
+hls: true
+hlsAddress: 0.0.0.0:8888
+hlsAlwaysRemux: true
+hlsSegmentCount: 5
+hlsSegmentDuration: 2s
+
+# WebRTC
+webrtc: true
+webrtcAddress: 0.0.0.0:8889
+
+# Disable SRT (conflicts with metrics port)
+srt: false
+
+# Paths (camera streams)
+paths:
+  all:
+    source: publisher

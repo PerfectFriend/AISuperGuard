@@ -2,38 +2,49 @@
 Actuator health monitoring and IP discovery service.
 Runs periodic keep-alive checks and auto-rediscovers IPs via MAC/ARP.
 Sends Telegram alerts if actuator is offline for 3+ minutes.
+
+Supports multiple actuator types:
+- Tuya (tinytuya)
+- Sonoff (eWeLink API / MQTT)
+- Shelly (HTTP API / MQTT)
+- Tasmota (HTTP API / MQTT)
+- GPIO (local Raspberry Pi / sysfs)
+- MQTT (generic MQTT broker)
+- HTTP (generic REST API)
 """
 import asyncio
 import subprocess
 import threading
+import os
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
 
 try:
     import tinytuya
 except ImportError:
     tinytuya = None
 
+try:
+    import aiohttp
+except ImportError:
+    aiohttp = None
+
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:
+    mqtt = None
+
 from app.core.encryption import get_encryption
 
 
-@dataclass
-class ActuatorConfig:
-    """Actuator configuration extracted from DB."""
-    id: str
-    name: str
-    type: str
-    ip: str
-    device_id: str
-    local_key: str
-    mac: str
-    port: int = 6668
-    version: float = 3.4
-
+# ============================================================================
+# Actuator Discovery Utilities
+# ============================================================================
 
 class ActuatorDiscovery:
-    """Handles IP discovery and health checks for Tuya actuators."""
+    """Static utility class for IP discovery and basic connectivity checks."""
     
     @staticmethod
     def discover_ip_by_mac(mac: str) -> Optional[str]:
@@ -98,126 +109,682 @@ class ActuatorDiscovery:
             return result.returncode == 0
         except Exception:
             return False
+
+
+# ============================================================================
+# Base Actuator Interface
+# ============================================================================
+
+class BaseActuator(ABC):
+    """Abstract base class for all actuator types."""
     
-    @staticmethod
-    def test_tuya_connection(config: ActuatorConfig, timeout: int = 5) -> bool:
-        """Test Tuya actuator connection via tinytuya."""
+    @abstractmethod
+    async def test_connection(self) -> bool:
+        """Test if actuator is reachable and responsive."""
+        pass
+    
+    @abstractmethod
+    async def get_status(self) -> Optional[bool]:
+        """Get current on/off status. Returns True=on, False=off, None=unknown."""
+        pass
+    
+    @abstractmethod
+    async def set_state(self, turn_on: bool) -> bool:
+        """Set actuator state. Returns True if command succeeded."""
+        pass
+    
+    @abstractmethod
+    async def rediscover_ip(self) -> Optional[str]:
+        """Attempt to rediscover IP address. Returns new IP or None."""
+        pass
+
+
+# ============================================================================
+# Tuya Actuator Implementation
+# ============================================================================
+
+@dataclass
+class ActuatorConfig:
+    """Actuator configuration extracted from DB."""
+    id: str
+    name: str
+    type: str
+    ip: str
+    device_id: str
+    local_key: str
+    mac: str
+    port: int = 6668
+    version: float = 3.4
+    # Sonoff specific
+    sonoff_apikey: str = ""
+    # Shelly specific
+    shelly_auth_key: str = ""
+    # Tasmota specific
+    tasmota_username: str = ""
+    tasmota_password: str = ""
+    # MQTT specific
+    mqtt_topic: str = ""
+    mqtt_broker: str = ""
+    mqtt_username: str = ""
+    mqtt_password: str = ""
+    # HTTP specific
+    http_on_url: str = ""
+    http_off_url: str = ""
+    http_status_url: str = ""
+    http_headers: Dict[str, str] = field(default_factory=dict)
+    # GPIO specific
+    gpio_pin: int = -1
+    gpio_active_low: bool = False
+
+
+# ============================================================================
+# Tuya Actuator Implementation
+# ============================================================================
+
+class TuyaActuator(BaseActuator):
+    """Tuya actuator using tinytuya library."""
+    
+    def __init__(self, config: ActuatorConfig):
+        self.config = config
+    
+    async def test_connection(self) -> bool:
+        return await self._test_tuya_connection()
+    
+    async def get_status(self) -> Optional[bool]:
+        return await self._get_tuya_status()
+    
+    async def set_state(self, turn_on: bool) -> bool:
+        return await self._set_tuya_state(turn_on)
+    
+    async def rediscover_ip(self) -> Optional[str]:
+        return ActuatorDiscovery.discover_ip_by_mac(self.config.mac)
+    
+    async def _test_tuya_connection(self) -> bool:
         if not tinytuya:
-            # Fallback to ping if tinytuya not available
-            return ActuatorDiscovery.ping_host(config.ip, timeout)
+            return ActuatorDiscovery.ping_host(self.config.ip)
         
         try:
             device = tinytuya.OutletDevice(
-                dev_id=config.device_id,
-                address=config.ip,
-                local_key=config.local_key,
-                version=config.version
+                dev_id=self.config.device_id,
+                address=self.config.ip,
+                local_key=self.config.local_key,
+                version=self.config.version
             )
             device.set_socketPersistent(False)
-            device.set_socketTimeout(timeout)
-            
-            # Try to get status - this will fail if unreachable
+            device.set_socketTimeout(5)
             status = device.status()
             return status is not None and 'dps' in status
         except Exception:
             return False
-
-    @staticmethod
-    def get_tuya_status(config: ActuatorConfig, timeout: int = 5) -> Optional[bool]:
-        """Get actual on/off status from Tuya actuator."""
+    
+    async def _get_tuya_status(self) -> Optional[bool]:
         if not tinytuya:
             return None
         
         try:
             device = tinytuya.OutletDevice(
-                dev_id=config.device_id,
-                address=config.ip,
-                local_key=config.local_key,
-                version=config.version
+                dev_id=self.config.device_id,
+                address=self.config.ip,
+                local_key=self.config.local_key,
+                version=self.config.version
             )
             device.set_socketPersistent(False)
-            device.set_socketTimeout(timeout)
-            
+            device.set_socketTimeout(5)
             status = device.status()
             if status and 'dps' in status:
-                # DPS '1' is typically the switch state
                 return bool(status['dps'].get('1', False))
             return None
         except Exception:
             return None
-
-    @staticmethod
-    def set_tuya_state(config: ActuatorConfig, turn_on: bool, timeout: int = 5) -> bool:
-        """Set Tuya actuator on/off state."""
+    
+    async def _set_tuya_state(self, turn_on: bool) -> bool:
         if not tinytuya:
             return False
         
         try:
             device = tinytuya.OutletDevice(
-                dev_id=config.device_id,
-                address=config.ip,
-                local_key=config.local_key,
-                version=config.version
+                dev_id=self.config.device_id,
+                address=self.config.ip,
+                local_key=self.config.local_key,
+                version=self.config.version
             )
             device.set_socketPersistent(False)
-            device.set_socketTimeout(timeout)
-            
-            # DPS '1' is typically the switch
+            device.set_socketTimeout(5)
             result = device.set_status(turn_on, switch=1)
             return result is not None
         except Exception:
             return False
     
-    @classmethod
-    def check_and_rediscover(cls, config: ActuatorConfig) -> Dict[str, Any]:
-        """
-        Check actuator connectivity, rediscover IP via MAC if needed.
-        
-        Returns dict with:
-        - online: bool
-        - ip_changed: bool
-        - new_ip: str or None
-        - method: 'ping' | 'tuya' | 'rediscovered'
-        """
-        # First try ping (fast)
-        if cls.ping_host(config.ip):
-            # Host responds to ping, try Tuya protocol
-            if cls.test_tuya_connection(config):
-                return {
-                    'online': True,
-                    'ip_changed': False,
-                    'new_ip': None,
-                    'method': 'tuya'
-                }
-        
-        # Not reachable - try ARP discovery via MAC
-        new_ip = cls.discover_ip_by_mac(config.mac)
-        
-        if new_ip and new_ip != config.ip:
-            # Found new IP, test it
-            old_ip = config.ip
-            config.ip = new_ip
-            
-            if cls.test_tuya_connection(config):
-                return {
-                    'online': True,
-                    'ip_changed': True,
-                    'new_ip': new_ip,
-                    'method': 'rediscovered',
-                    'old_ip': old_ip
-                }
-            else:
-                # Revert IP if new one doesn't work
-                config.ip = old_ip
-        
-        # Still offline
-        return {
-            'online': False,
-            'ip_changed': False,
-            'new_ip': None,
-            'method': 'failed'
-        }
+    async def rediscover_ip(self) -> Optional[str]:
+        return ActuatorDiscovery.discover_ip_by_mac(self.config.mac)
 
+
+# ============================================================================
+# Sonoff Actuator Implementation (eWeLink API)
+# ============================================================================
+
+class SonoffActuator(BaseActuator):
+    """Sonoff actuator using eWeLink API or local LAN mode."""
+    
+    def __init__(self, config: ActuatorConfig):
+        self.config = config
+    
+    async def test_connection(self) -> bool:
+        """Test Sonoff connection via eWeLink API or local LAN."""
+        if self.config.sonoff_apikey:
+            return await self._test_ewelink()
+        else:
+            return await self._test_local_lan()
+    
+    async def get_status(self) -> Optional[bool]:
+        if self.config.sonoff_apikey:
+            return await self._get_status_ewelink()
+        else:
+            return await self._get_status_local()
+    
+    async def set_state(self, turn_on: bool) -> bool:
+        if self.config.sonoff_apikey:
+            return await self._set_state_ewelink(turn_on)
+        else:
+            return await self._set_state_local(turn_on)
+    
+    async def rediscover_ip(self) -> Optional[str]:
+        return ActuatorDiscovery.discover_ip_by_mac(self.config.mac)
+    
+    async def _test_ewelink(self) -> bool:
+        """Test via eWeLink cloud API."""
+        try:
+            import aiohttp
+            headers = {'Authorization': f'Bearer {self.config.sonoff_apikey}'}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f'https://api.coolkit.cc:8080/api/user/device/{self.config.device_id}',
+                    headers=headers,
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+    
+    async def _test_local_lan(self) -> bool:
+        """Test via local LAN (DIY mode)."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f'http://{self.config.ip}:8081/zeroconf/info',
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return ActuatorDiscovery.ping_host(self.config.ip)
+    
+    async def _get_status_ewelink(self) -> Optional[bool]:
+        """Get status via eWeLink API."""
+        try:
+            import aiohttp
+            headers = {'Authorization': f'Bearer {self.config.sonoff_apikey}'}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f'https://api.coolkit.cc:8080/api/user/device/{self.config.device_id}',
+                    headers=headers,
+                    timeout=5
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get('params', {}).get('switch') == 'on'
+            return None
+        except Exception:
+            return None
+    
+    async def _get_status_local(self) -> Optional[bool]:
+        """Get status via local LAN."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f'http://{self.config.ip}:8081/zeroconf/info',
+                    json={"deviceid": "", "data": {}},
+                    timeout=5
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get('data', {}).get('switch') == 'on'
+            return None
+        except Exception:
+            return None
+    
+    async def _set_state_ewelink(self, turn_on: bool) -> bool:
+        """Set state via eWeLink API."""
+        try:
+            import aiohttp
+            headers = {
+                'Authorization': f'Bearer {self.config.sonoff_apikey}',
+                'Content-Type': 'application/json'
+            }
+            payload = {
+                'deviceid': self.config.device_id,
+                'params': {'switch': 'on' if turn_on else 'off'}
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    'https://api.coolkit.cc:8080/api/user/device/control',
+                    headers=headers,
+                    json=payload,
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+    
+    async def _set_state_local(self, turn_on: bool) -> bool:
+        """Set state via local LAN (DIY mode)."""
+        try:
+            import aiohttp
+            payload = {
+                "deviceid": "",
+                "data": {"switch": "on" if turn_on else "off"}
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f'http://{self.config.ip}:8081/zeroconf/switch',
+                    json=payload,
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+    
+    async def _get_status_local(self) -> Optional[bool]:
+        """Get status via local LAN."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f'http://{self.config.ip}:8081/zeroconf/info',
+                    json={"deviceid": "", "data": {}},
+                    timeout=5
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get('data', {}).get('switch') == 'on'
+            return None
+        except Exception:
+            return None
+    
+    async def _set_state_local(self, turn_on: bool) -> bool:
+        """Set state via local LAN (DIY mode)."""
+        try:
+            import aiohttp
+            payload = {
+                "deviceid": "",
+                "data": {"switch": "on" if turn_on else "off"}
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f'http://{self.config.ip}:8081/zeroconf/switch',
+                    json=payload,
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+
+
+# ============================================================================
+# Shelly Actuator Implementation
+# ============================================================================
+
+class ShellyActuator(BaseActuator):
+    """Shelly actuator using HTTP API."""
+    
+    def __init__(self, config: ActuatorConfig):
+        self.config = config
+    
+    async def test_connection(self) -> bool:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f'http://{self.config.ip}/rpc/Shelly.GetStatus',
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return ActuatorDiscovery.ping_host(self.config.ip)
+    
+    async def get_status(self) -> Optional[bool]:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f'http://{self.config.ip}/rpc/Switch.GetStatus',
+                    json={"id": 0},
+                    timeout=5
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get('output', False)
+            return None
+        except Exception:
+            return None
+    
+    async def set_state(self, turn_on: bool) -> bool:
+        try:
+            import aiohttp
+            auth = None
+            if self.config.shelly_auth_key:
+                import base64
+                auth = aiohttp.BasicAuth('admin', self.config.shelly_auth_key)
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f'http://{self.config.ip}/rpc/Switch.Set',
+                    json={"id": 0, "on": turn_on},
+                    auth=auth,
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+    
+    async def rediscover_ip(self) -> Optional[str]:
+        return ActuatorDiscovery.discover_ip_by_mac(self.config.mac)
+
+
+# ============================================================================
+# Tasmota Actuator Implementation
+# ============================================================================
+
+class TasmotaActuator(BaseActuator):
+    """Tasmota actuator using HTTP API."""
+    
+    def __init__(self, config: ActuatorConfig):
+        self.config = config
+    
+    async def test_connection(self) -> bool:
+        try:
+            import aiohttp
+            auth = None
+            if self.config.tasmota_username and self.config.tasmota_password:
+                import aiohttp
+                auth = aiohttp.BasicAuth(self.config.tasmota_username, self.config.tasmota_password)
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f'http://{self.config.ip}/cm?cmnd=Status',
+                    auth=auth,
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return ActuatorDiscovery.ping_host(self.config.ip)
+    
+    async def get_status(self) -> Optional[bool]:
+        try:
+            import aiohttp
+            auth = None
+            if self.config.tasmota_username and self.config.tasmota_password:
+                import aiohttp
+                auth = aiohttp.BasicAuth(self.config.tasmota_username, self.config.tasmota_password)
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f'http://{self.config.ip}/cm?cmnd=Power',
+                    auth=auth,
+                    timeout=5
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get('POWER') == 'ON'
+            return None
+        except Exception:
+            return None
+    
+    async def set_state(self, turn_on: bool) -> bool:
+        try:
+            import aiohttp
+            auth = None
+            if self.config.tasmota_username and self.config.tasmota_password:
+                import aiohttp
+                auth = aiohttp.BasicAuth(self.config.tasmota_username, self.config.tasmota_password)
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f'http://{self.config.ip}/cm?cmnd=Power%20{"On" if turn_on else "Off"}',
+                    auth=auth,
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+    
+    async def rediscover_ip(self) -> Optional[str]:
+        return ActuatorDiscovery.discover_ip_by_mac(self.config.mac)
+
+
+# ============================================================================
+# GPIO Actuator Implementation (Raspberry Pi / Linux sysfs)
+# ============================================================================
+
+class GPIOActuator(BaseActuator):
+    """GPIO actuator using Linux sysfs or libgpiod."""
+    
+    def __init__(self, config: ActuatorConfig):
+        self.config = config
+        self._gpio_exported = False
+    
+    async def test_connection(self) -> bool:
+        # GPIO is always local, just check if pin is exported
+        return self._ensure_gpio_exported()
+    
+    async def get_status(self) -> Optional[bool]:
+        try:
+            value_path = f'/sys/class/gpio/gpio{self.config.gpio_pin}/value'
+            with open(value_path, 'r') as f:
+                value = int(f.read().strip())
+                # Handle active_low
+                if self.config.gpio_active_low:
+                    return value == 0
+                return value == 1
+        except Exception:
+            return None
+    
+    async def set_state(self, turn_on: bool) -> bool:
+        if not self._ensure_gpio_exported():
+            return False
+        
+        try:
+            value_path = f'/sys/class/gpio/gpio{self.config.gpio_pin}/value'
+            # Handle active_low
+            value = 1 if turn_on else 0
+            if self.config.gpio_active_low:
+                value = 0 if turn_on else 1
+            
+            with open(value_path, 'w') as f:
+                f.write(str(value))
+            return True
+        except Exception:
+            return False
+    
+    async def rediscover_ip(self) -> Optional[str]:
+        return None  # GPIO is local, no IP
+    
+    def _ensure_gpio_exported(self) -> bool:
+        """Export GPIO pin if not already exported."""
+        if self._gpio_exported:
+            return True
+        
+        try:
+            export_path = '/sys/class/gpio/export'
+            direction_path = f'/sys/class/gpio/gpio{self.config.gpio_pin}/direction'
+            
+            # Check if already exported
+            if not os.path.exists(f'/sys/class/gpio/gpio{self.config.gpio_pin}'):
+                with open(export_path, 'w') as f:
+                    f.write(str(self.config.gpio_pin))
+            
+            # Set direction to out
+            with open(direction_path, 'w') as f:
+                f.write('out')
+            
+            self._gpio_exported = True
+            return True
+        except Exception:
+            return False
+
+
+# ============================================================================
+# MQTT Actuator Implementation
+# ============================================================================
+
+class MQTTActuator(BaseActuator):
+    """MQTT actuator using generic MQTT broker."""
+    
+    def __init__(self, config: ActuatorConfig):
+        self.config = config
+        self._client = None
+    
+    async def test_connection(self) -> bool:
+        try:
+            import paho.mqtt.client as mqtt
+            # Quick connection test
+            client = mqtt.Client()
+            client.username_pw_set(self.config.mqtt_username, self.config.mqtt_password)
+            client.connect(self.config.mqtt_broker, 1883, 5)
+            client.disconnect()
+            return True
+        except Exception:
+            return False
+    
+    async def get_status(self) -> Optional[bool]:
+        # MQTT is async - status would come via subscription
+        # For test purposes, publish get command and wait for response
+        return None  # Requires subscription handler
+    
+    async def set_state(self, turn_on: bool) -> bool:
+        try:
+            import paho.mqtt.client as mqtt
+            client = mqtt.Client()
+            if self.config.mqtt_username:
+                client.username_pw_set(self.config.mqtt_username, self.config.mqtt_password)
+            
+            client.connect(self.config.mqtt_broker, 1883, 5)
+            payload = "ON" if turn_on else "OFF"
+            result = client.publish(self.config.mqtt_topic, payload, qos=1)
+            client.disconnect()
+            return result.rc == 0
+        except Exception:
+            return False
+    
+    async def rediscover_ip(self) -> Optional[str]:
+        return None  # MQTT broker IP is fixed in config
+
+
+# ============================================================================
+# HTTP Actuator Implementation (Generic REST)
+# ============================================================================
+
+class HTTPActuator(BaseActuator):
+    """Generic HTTP actuator using REST API."""
+    
+    def __init__(self, config: ActuatorConfig):
+        self.config = config
+    
+    async def test_connection(self) -> bool:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.config.http_status_url or self.config.http_on_url,
+                    headers=self.config.http_headers,
+                    timeout=5
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return ActuatorDiscovery.ping_host(self.config.ip)
+    
+    async def get_status(self) -> Optional[bool]:
+        if not self.config.http_status_url:
+            return None
+        
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.config.http_status_url,
+                    headers=self.config.http_headers,
+                    timeout=5
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # Expecting {"state": true/false} or similar
+                        return data.get('state') or data.get('on') or data.get('value')
+            return None
+        except Exception:
+            return None
+    
+    async def set_state(self, turn_on: bool) -> bool:
+        url = self.config.http_on_url if turn_on else self.config.http_off_url
+        if not url:
+            return False
+        
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers=self.config.http_headers,
+                    timeout=5
+                ) as resp:
+                    return resp.status in (200, 201, 204)
+        except Exception:
+            return False
+    
+    async def rediscover_ip(self) -> Optional[str]:
+        return ActuatorDiscovery.discover_ip_by_mac(self.config.mac)
+
+
+# ============================================================================
+# Actuator Factory
+# ============================================================================
+
+def create_actuator(config: ActuatorConfig) -> BaseActuator:
+    """
+    Factory function to create the appropriate actuator instance based on type.
+    
+    Args:
+        config: ActuatorConfig with all necessary parameters
+        
+    Returns:
+        BaseActuator: Concrete actuator implementation for the given type
+        
+    Raises:
+        ValueError: If actuator type is not supported
+    """
+    actuator_type = config.type.lower()
+    
+    if actuator_type in ('tuya', 'tinytuya'):
+        return TuyaActuator(config)
+    elif actuator_type == 'sonoff':
+        return SonoffActuator(config)
+    elif actuator_type == 'shelly':
+        return ShellyActuator(config)
+    elif actuator_type == 'tasmota':
+        return TasmotaActuator(config)
+    elif actuator_type == 'gpio':
+        return GPIOActuator(config)
+    elif actuator_type == 'mqtt':
+        return MQTTActuator(config)
+    elif actuator_type == 'http':
+        return HTTPActuator(config)
+    else:
+        raise ValueError(f"Unsupported actuator type: {config.type}")
+
+
+# ============================================================================
+# Actuator Health Monitor
+# ============================================================================
 
 class ActuatorHealthMonitor:
     """Background monitor that checks all actuators every minute.
@@ -293,20 +860,7 @@ class ActuatorHealthMonitor:
         encryption = get_encryption()
         cfg = encryption.decrypt_dict(cfg)
         
-        # Only handle Tuya actuators for now
-        if actuator.type.value not in ('tuya', 'tinytuya'):
-            # For other types, just ping
-            ip = cfg.get('ip')
-            online = False
-            if ip:
-                online = ActuatorDiscovery.ping_host(ip)
-                actuator.is_online = online
-                actuator.last_seen = datetime.utcnow() if online else actuator.last_seen
-            
-            # Track offline state
-            await self._update_offline_tracking(actuator.id, online)
-            return {'online': online}
-        
+        # Create appropriate actuator instance
         config = ActuatorConfig(
             id=actuator.id,
             name=actuator.name,
@@ -317,28 +871,65 @@ class ActuatorHealthMonitor:
             mac=cfg.get('mac', ''),
             port=cfg.get('port', 6668),
             version=cfg.get('version', 3.4),
+            # Sonoff
+            sonoff_apikey=cfg.get('sonoff_apikey', ''),
+            # Shelly
+            shelly_auth_key=cfg.get('shelly_auth_key', ''),
+            # Tasmota
+            tasmota_username=cfg.get('tasmota_username', ''),
+            tasmota_password=cfg.get('tasmota_password', ''),
+            # MQTT
+            mqtt_topic=cfg.get('mqtt_topic', ''),
+            mqtt_broker=cfg.get('mqtt_broker', ''),
+            mqtt_username=cfg.get('mqtt_username', ''),
+            mqtt_password=cfg.get('mqtt_password', ''),
+            # HTTP
+            http_on_url=cfg.get('http_on_url', ''),
+            http_off_url=cfg.get('http_off_url', ''),
+            http_status_url=cfg.get('http_status_url', ''),
+            http_headers=cfg.get('http_headers', {}),
+            # GPIO
+            gpio_pin=cfg.get('gpio_pin', -1),
+            gpio_active_low=cfg.get('gpio_active_low', False),
         )
         
-        # Check and potentially rediscover
-        result = ActuatorDiscovery.check_and_rediscover(config)
+        # Create actuator instance
+        try:
+            actuator_instance = create_actuator(config)
+        except ValueError as e:
+            print(f"[ActuatorHealthMonitor] Unknown actuator type {actuator.type.value}: {e}")
+            return {'online': False, 'error': str(e)}
+        
+        # Test connection
+        online = await actuator_instance.test_connection()
         
         # Update actuator in DB
-        actuator.is_online = result['online']
-        actuator.last_seen = datetime.utcnow() if result['online'] else actuator.last_seen
+        actuator.is_online = online
+        actuator.last_seen = datetime.utcnow() if online else actuator.last_seen
         
-        # If IP changed, update config in DB (encrypt before saving)
-        if result.get('ip_changed') and result.get('new_ip'):
-            encryption = get_encryption()
-            new_config = dict(cfg)
-            new_config['ip'] = result['new_ip']
-            new_config = encryption.encrypt_dict(new_config)
-            actuator.config = new_config
-            print(f"[ActuatorHealthMonitor] {actuator.name}: IP updated {result.get('old_ip')} -> {result['new_ip']}")
+        # If IP changed (for types that support rediscovery), update config
+        # Note: IP rediscovery is only for Tuya/Sonoff/Shelly/Tasmota/HTTP
+        if hasattr(actuator_instance, 'rediscover_ip'):
+            new_ip = await actuator_instance.rediscover_ip()
+            if new_ip and new_ip != config.ip:
+                # Test new IP
+                old_ip = config.ip
+                config.ip = new_ip
+                new_actuator = create_actuator(config)
+                if await new_actuator.test_connection():
+                    # IP changed successfully - update DB
+                    encryption = get_encryption()
+                    new_config = dict(actuator.config or {})
+                    new_config['ip'] = new_ip
+                    new_config = encryption.encrypt_dict(new_config)
+                    actuator.config = new_config
+                    print(f"[ActuatorHealthMonitor] {actuator.name}: IP updated {config.ip} -> {new_ip}")
+                    return {'online': True, 'ip_changed': True, 'new_ip': new_ip, 'old_ip': config.ip}
         
-        # Track offline state and send alerts if needed
-        await self._update_offline_tracking(actuator.id, result['online'], actuator.name, cfg, db)
+        # Update offline tracking and send alerts if needed
+        await self._update_offline_tracking(actuator.id, online, actuator.name, cfg, db)
         
-        return result
+        return {'online': online}
     
     async def _update_offline_tracking(self, actuator_id: str, online: bool, name: str = "", config: Dict = None, db=None):
         """Track consecutive offline checks and send alert after 3 minutes."""
@@ -366,7 +957,7 @@ class ActuatorHealthMonitor:
                 tracking['consecutive_failures'] += 1
                 
                 if tracking['offline_since'] is None:
-                    tracking['offline_since'] = now
+                    tracking['offline_since'] = datetime.utcnow()
                 
                 # Check if we should send alert (3 consecutive failures = 3 minutes)
                 if tracking['consecutive_failures'] >= 3 and not tracking['alert_sent']:

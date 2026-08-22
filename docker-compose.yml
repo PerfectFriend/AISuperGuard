@@ -1,0 +1,137 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: superguard-postgres
+    environment:
+      POSTGRES_DB: superguard
+      POSTGRES_USER: superguard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-superguard}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superguard -d superguard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - superguard-network
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: superguard-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - superguard-network
+    restart: unless-stopped
+
+  # MediaMTX - RTSP/HLS/WebRTC streaming
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: superguard-mediamtx
+    ports:
+      - "8554:8554"   # RTSP
+      - "8888:8888"   # HLS
+      - "8889:8889"   # WebRTC/WHIP
+      - "8890:8890"   # WHEP
+      - "9997:9997"   # SRT
+      - "1935:1935"   # RTMP
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    environment:
+      - MTX_LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9997/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - superguard-network
+    restart: unless-stopped
+
+  # SuperGuard API
+  api:
+    build:
+      context: ./superguard-api
+      dockerfile: Dockerfile
+    container_name: superguard-api
+    ports:
+      - "3001:3001"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://superguard:${POSTGRES_PASSWORD:-superguard}@postgres:5432/superguard
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - TELEGRAM_ENABLED=true
+      - SG_ENC_KEY=${SG_ENC_KEY}
+      - MEDIAMTX_URL=http://mediamtx:8888
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mediamtx:
+        condition: service_healthy
+    networks:
+      - superguard-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  # SuperGuard Dashboard
+  dashboard:
+    build:
+      context: ./superguard-dashboard
+      dockerfile: Dockerfile
+    container_name: superguard-dashboard
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_URL=http://localhost:3001
+    depends_on:
+      - api
+    networks:
+      - superguard-network
+    restart: unless-stopped
+
+  # Nginx reverse proxy (optional, for production)
+  nginx:
+    image: nginx:alpine
+    container_name: superguard-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+      - dashboard
+    networks:
+      - superguard-network
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  superguard-network:
+    driver: bridge

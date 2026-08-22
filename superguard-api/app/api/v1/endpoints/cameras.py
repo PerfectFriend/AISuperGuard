@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.core.encryption import get_encryption
 from app.models import Camera, Zone, ActuatorBinding, Actuator, User
 from app.api.v1.endpoints.auth import get_current_user
 from app.schemas import (
@@ -49,9 +50,14 @@ async def create_camera(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # Encrypt sensitive fields using Fernet encryption
+    encryption = get_encryption()
     data = req.model_dump(exclude={"zone", "password"})
+    
+    # Encrypt password if provided
     if req.password:
-        data["password_hash"] = req.password  # TODO: encrypt
+        data["password_hash"] = encryption.encrypt(req.password)
+    
     cam = Camera(site_id=site_id, **data)
     db.add(cam)
     await db.flush()
@@ -109,7 +115,15 @@ async def update_camera(
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    for k, v in req.model_dump(exclude_unset=True).items():
+    # Encrypt sensitive fields if provided
+    encryption = get_encryption()
+    update_data = req.model_dump(exclude_unset=True)
+    
+    # Encrypt password if provided
+    if 'password' in update_data and update_data['password']:
+        update_data['password_hash'] = encryption.encrypt(update_data.pop('password'))
+    
+    for k, v in update_data.items():
         setattr(cam, k, v)
     await db.flush()
     return cam
@@ -210,10 +224,245 @@ async def discover_cameras(
     req: CameraDiscoverRequest,
     user: User = Depends(get_current_user),
 ):
-    # Placeholder: real ONVIF/UPnP scan would go here
-    return [
-        DiscoveredCamera(ip="192.168.1.100", port=80, manufacturer="Generic", onvif=True, url="rtsp://192.168.1.100:554/stream1"),
-    ]
+    """
+    Discover cameras on the network using multiple protocols:
+    - WS-Discovery (ONVIF)
+    - UPnP/SSDP
+    - mDNS/Bonjour
+    - ARP scan for local devices
+    
+    Returns a list of discovered cameras with their stream URLs and capabilities.
+    """
+    import asyncio
+    import subprocess
+    import re
+    import ipaddress
+    from urllib.parse import urlparse
+    
+    discovered = []
+    network_range = req.network_range or "192.168.1.0/24"
+    
+    # Parse network range for scanning
+    network = None
+    hosts = []
+    try:
+        network = ipaddress.ip_network(network_range, strict=False)
+        hosts = list(network.hosts())[:50]  # Limit to first 50 hosts for performance
+    except Exception:
+        hosts = []
+    
+    # Method 1: WS-Discovery (ONVIF) - scan for ONVIF devices
+    async def scan_ws_discovery():
+        """Scan for ONVIF devices using WS-Discovery probe."""
+        try:
+            # Use wsdiscovery library if available, otherwise use raw UDP probe
+            try:
+                from wsdiscovery import WSDiscovery
+                wsd = WSDiscovery()
+                wsd.start()
+                services = wsd.searchServices()
+                wsd.stop()
+                
+                for service in services:
+                    xaddrs = service.getXAddrs()
+                    for xaddr in xaddrs:
+                        if xaddr:
+                            parsed = urlparse(xaddr)
+                            ip = parsed.hostname
+                            port = parsed.port or 80
+                            # Try to get device info
+                            try:
+                                from onvif import ONVIFCamera
+                                cam = ONVIFCamera(ip, port, '', '')
+                                info = cam.devicemgmt.GetDeviceInformation()
+                                manufacturer_name = info.Manufacturer if info and info.Manufacturer else "Unknown"
+                                discovered.append(DiscoveredCamera(
+                                    ip=ip,
+                                    port=port,
+                                    manufacturer=manufacturer_name,
+                                    onvif=True,
+                                    url=f"rtsp://{ip}:554/stream1"
+                                ))
+                            except Exception:
+                                # ONVIF device found but auth failed or no stream
+                                discovered.append(DiscoveredCamera(
+                                    ip=ip,
+                                    port=port,
+                                    manufacturer="Unknown",
+                                    onvif=True,
+                                    url=f"rtsp://{ip}:554/stream1"
+                                ))
+            except ImportError:
+                # wsdiscovery not available, fall back to manual probe
+                pass
+        except Exception as e:
+            print(f"[CameraDiscovery] WS-Discovery error: {e}")
+    
+    # Method 2: UPnP/SSDP scan
+    async def scan_upnp():
+        """Scan for UPnP devices using SSDP M-SEARCH."""
+        try:
+            import socket
+            import struct
+            
+            # SSDP M-SEARCH request
+            message = (
+                "M-SEARCH * HTTP/1.1\r\n"
+                "HOST: 239.255.255.250:1900\r\n"
+                "MAN: \"ssdp:discover\"\r\n"
+                "MX: 3\r\n"
+                "ST: urn:schemas-upnp-org:device:basic:1\r\n"
+                "\r\n"
+            )
+            
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            sock.settimeout(3)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+            
+            # Send to multicast
+            sock.sendto(message.encode(), ('239.255.255.250', 1900))
+            
+            # Collect responses
+            try:
+                while True:
+                    data, addr = sock.recvfrom(65507)
+                    response = data.decode('utf-8', errors='ignore')
+                    ip = addr[0]
+                    
+                    # Parse UPnP response for camera info
+                    manufacturer = "Unknown"
+                    if "Manufacturer" in response:
+                        match = re.search(r'Manufacturer:\s*(.+)', response, re.IGNORECASE)
+                        if match:
+                            manufacturer = match.group(1).strip()
+                    elif "Server" in response:
+                        match = re.search(r'Server:\s*(.+)', response, re.IGNORECASE)
+                        if match:
+                            manufacturer = match.group(1).strip()
+                    
+                    # Check if it's a camera
+                    is_camera = any(keyword in response.lower() for keyword in 
+                                   ['camera', 'ipcam', 'nvr', 'dvr', 'onvif', 'surveillance'])
+                    
+                    if is_camera or 'camera' in manufacturer.lower():
+                        discovered.append(DiscoveredCamera(
+                            ip=ip,
+                            port=80,
+                            manufacturer=manufacturer,
+                            onvif='onvif' in response.lower(),
+                            url=f"rtsp://{ip}:554/stream1"
+                        ))
+            except socket.timeout:
+                pass
+            finally:
+                sock.close()
+        except Exception as e:
+            print(f"[CameraDiscovery] UPnP scan error: {e}")
+    
+    # Method 3: mDNS/Bonjour scan
+    async def scan_mdns():
+        """Scan for cameras using mDNS/DNS-SD."""
+        try:
+            # Try to use zeroconf if available
+            try:
+                from zeroconf import Zeroconf, ServiceBrowser, ServiceStateChange
+                import threading
+                
+                found_devices = []
+                
+                def on_service_state_change(zeroconf, service_type, name, state_change):
+                    if state_change == ServiceStateChange.Added:
+                        info = zeroconf.get_service_info(service_type, name)
+                        if info:
+                            ip = info.parsed_addresses()[0] if info.parsed_addresses() else None
+                            if ip:
+                                found_devices.append({
+                                    'ip': ip,
+                                    'name': name,
+                                    'port': info.port,
+                                    'properties': info.properties
+                                })
+                
+                zc = Zeroconf()
+                browser = ServiceBrowser(zc, "_rtsp._tcp.local.", handlers=[on_service_state_change])
+                browser2 = ServiceBrowser(zc, "_onvif._tcp.local.", handlers=[on_service_state_change])
+                
+                await asyncio.sleep(3)
+                zc.close()
+                
+                for device in found_devices:
+                    manufacturer = device['properties'].get(b'manufacturer', b'Unknown').decode('utf-8', errors='ignore')
+                    discovered.append(DiscoveredCamera(
+                        ip=device['ip'],
+                        port=device['port'],
+                        manufacturer=manufacturer,
+                        onvif=True,
+                        url=f"rtsp://{device['ip']}:554/stream1"
+                    ))
+            except ImportError:
+                pass
+        except Exception as e:
+            print(f"[CameraDiscovery] mDNS scan error: {e}")
+    
+    # Method 4: ARP/Ping scan for local network
+    async def scan_arp_ping():
+        """Scan local network via ARP table and ping sweep."""
+        if not hosts:
+            return
+            
+        # Get current ARP table
+        try:
+            result = subprocess.run(
+                ['ip', 'neigh', 'show'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if 'lladdr' in line:
+                        parts = line.split()
+                        try:
+                            lladdr_idx = parts.index('lladdr')
+                            if lladdr_idx + 1 < len(parts):
+                                ip_addr = parts[0]
+                                mac = parts[lladdr_idx + 1]
+                                # Only add if in our scan range
+                                if network is not None:
+                                    try:
+                                        if ipaddress.ip_address(ip_addr) in network:
+                                            discovered.append(DiscoveredCamera(
+                                                ip=ip_addr,
+                                                port=80,
+                                                manufacturer="Unknown (ARP)",
+                                                onvif=False,
+                                                url=f"rtsp://{ip_addr}:554/stream1"
+                                            ))
+                                    except Exception:
+                                        pass
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+    
+    # Run all discovery methods concurrently
+    await asyncio.gather(
+        scan_ws_discovery(),
+        scan_upnp(),
+        scan_mdns(),
+        scan_arp_ping(),
+        return_exceptions=True
+    )
+    
+    # Deduplicate by IP
+    seen_ips = set()
+    unique_discovered = []
+    for cam in discovered:
+        if cam.ip not in seen_ips:
+            seen_ips.add(cam.ip)
+            unique_discovered.append(cam)
+    
+    return unique_discovered
 
 
 @router.get("/sites/{site_id}/cameras/{camera_id}/bindings", response_model=List[ActuatorBindingResponse])
