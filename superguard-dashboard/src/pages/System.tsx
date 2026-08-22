@@ -1,21 +1,185 @@
+import { useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { RefreshCw, Shield, Database, Server, Cpu, Info, Loader2 } from 'lucide-react';
+import { RefreshCw, Shield, Database, Server, Cpu, Info, Loader2, Key, List, Trash2, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useSystemHealth, useSystemLogs, useSystemVersion } from '@/hooks/useApiData';
+import { useSystemHealth, useSystemLogs, useSystemVersion, useInviteTokens, useAuditLogs } from '@/hooks/useApiData';
+import { useAuth } from '@/hooks/useApiData';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 
 export default function System() {
   const { t } = useTranslation('system');
   const { health, loading: healthLoading, refetch: refetchHealth } = useSystemHealth();
   const { logs, loading: logsLoading, refetch: refetchLogs } = useSystemLogs({ limit: 100 });
   const { version } = useSystemVersion();
+  const { user, isAuthenticated } = useAuth();
+
+  // Admin hooks
+  const { invites, loading: invitesLoading, refetch: refetchInvites, revokeInvite } = useInviteTokens();
+  const { logs: auditLogs, loading: auditLoading, refetch: refetchAudit } = useAuditLogs({ limit: 100 });
+
+  const isAdmin = isAuthenticated && user?.is_superuser;
+
+  // Admin tabs content
+  const InvitesTab = () => (
+    <TabsContent value="invites" className="mt-4 space-y-6">
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Key className="w-5 h-5" />
+              {t('invites') || 'Invite Tokens'}
+            </CardTitle>
+            <CardDescription>{t('invitesDescription') || 'Manage registration invite tokens'}</CardDescription>
+          </div>
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button variant="default" size="sm">
+                <Plus className="w-4 h-4 mr-2" />
+                {t('createInvite') || 'Create Invite'}
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>{t('createInvite') || 'Create Invite Token'}</DialogTitle>
+              </DialogHeader>
+              <CreateInviteDialog onSuccess={refetchInvites} />
+            </DialogContent>
+          </Dialog>
+        </CardHeader>
+        <CardContent>
+          {invitesLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {invites.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b text-left text-muted-foreground">
+                        <th className="pb-2 pr-4">{t('token') || 'Token'}</th>
+                        <th className="pb-2 pr-4">{t('role') || 'Role'}</th>
+                        <th className="pb-2 pr-4">{t('uses') || 'Uses'}</th>
+                        <th className="pb-2 pr-4">{t('expires') || 'Expires'}</th>
+                        <th className="pb-2 pr-4">{t('created') || 'Created'}</th>
+                        <th className="pb-2 pr-4"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invites.map((invite: any) => (
+                        <tr key={invite.id} className="border-b last:border-0">
+                          <td className="py-2 pr-4 font-mono text-xs">
+                            {invite.token.slice(0, 12)}...
+                          </td>
+                          <td className="py-2 pr-4 capitalize">{invite.role}</td>
+                          <td className="py-2 pr-4">{invite.used_count}/{invite.max_uses}</td>
+                          <td className="py-2 pr-4">
+                            {invite.expires_at ? new Date(invite.expires_at).toLocaleString() : '—'}
+                          </td>
+                          <td className="py-2 pr-4">
+                            {new Date(invite.created_at).toLocaleString()}
+                          </td>
+                          <td className="py-2 pr-4 text-right">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                              onClick={() => revokeInvite(invite.id)}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">{t('noInvites') || 'No invite tokens created yet'}</p>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </TabsContent>
+  );
+
+  const AuditTab = () => (
+    <TabsContent value="audit" className="mt-4 space-y-6">
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <List className="w-5 h-5" />
+              {t('audit') || 'Audit Log'}
+            </CardTitle>
+            <CardDescription>{t('auditDescription') || 'User activity audit trail'}</CardDescription>
+          </div>
+          <Button variant="outline" size="sm" onClick={refetchAudit} disabled={auditLoading}>
+            <RefreshCw className={`w-4 h-4 mr-2 ${auditLoading ? 'animate-spin' : ''}`} />
+            {t('refresh')}
+          </Button>
+        </CardHeader>
+        <CardContent>
+          {auditLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-12 w-12 animate-spin text-primary" />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {auditLogs.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b text-left text-muted-foreground">
+                        <th className="pb-2 pr-4">{t('time') || 'Time'}</th>
+                        <th className="pb-2 pr-4">{t('user') || 'User'}</th>
+                        <th className="pb-2 pr-4">{t('action') || 'Action'}</th>
+                        <th className="pb-2 pr-4">{t('resource') || 'Resource'}</th>
+                        <th className="pb-2 pr-4">{t('details') || 'Details'}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditLogs.map((log: any) => (
+                        <tr key={log.id} className="border-b last:border-0">
+                          <td className="py-2 pr-4">
+                            {new Date(log.created_at).toLocaleString()}
+                          </td>
+                          <td className="py-2 pr-4">
+                            {log.user_id ? log.user_id.slice(0, 8) + '...' : '—'}
+                          </td>
+                          <td className="py-2 pr-4 capitalize">{log.action.replace(/_/g, ' ')}</td>
+                          <td className="py-2 pr-4">
+                            {log.resource_type ? `${log.resource_type}${log.resource_id ? ':' + log.resource_id.slice(0, 8) : ''}` : '—'}
+                          </td>
+                          <td className="py-2 pr-4 text-xs text-muted-foreground max-w-xs truncate">
+                            {JSON.stringify(log.details || {})}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">{t('noAuditLogs') || 'No audit logs available'}</p>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </TabsContent>
+  );
 
   return (
     <div className="space-y-6">
       <h2 className="text-xl font-bold">{t('title')}</h2>
-      
+
       <Tabs defaultValue="general">
         <TabsList className="w-full">
           <TabsTrigger value="general">
@@ -42,8 +206,24 @@ export default function System() {
               {t('about')}
             </span>
           </TabsTrigger>
+          {isAdmin && (
+            <>
+              <TabsTrigger value="invites">
+                <span className="flex items-center gap-2">
+                  <Key className="w-4 h-4" />
+                  {t('invites') || 'Invite Tokens'}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger value="audit">
+                <span className="flex items-center gap-2">
+                  <List className="w-4 h-4" />
+                  {t('audit') || 'Audit Log'}
+                </span>
+              </TabsTrigger>
+            </>
+          )}
         </TabsList>
-        
+
         <TabsContent value="general" className="mt-4 space-y-6">
           <Card>
             <CardHeader>
@@ -61,7 +241,7 @@ export default function System() {
                 </div>
                 <Switch checked={true} onCheckedChange={() => {}} />
               </div>
-              
+
               <div className="flex items-center justify-between">
                 <div>
                   <h4 className="font-medium">{t('enableDarkMode')}</h4>
@@ -69,7 +249,7 @@ export default function System() {
                 </div>
                 <Switch checked={false} onCheckedChange={() => {}} />
               </div>
-              
+
               <div className="flex items-center justify-between">
                 <div>
                   <h4 className="font-medium">{t('sendAnalytics')}</h4>
@@ -79,7 +259,7 @@ export default function System() {
               </div>
             </CardContent>
           </Card>
-          
+
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -92,25 +272,25 @@ export default function System() {
               <div>
                 <label className="block text-sm font-medium mb-1">{t('apiBaseUrl')}</label>
                 <input
-                                  type="text"
-                                  defaultValue="http://localhost:3001"
-                                  className="w-full px-3 py-2 border rounded-md bg-background"
-                                  readOnly
-                                />
+                  type="text"
+                  defaultValue="http://localhost:3001"
+                  className="w-full px-3 py-2 border rounded-md bg-background"
+                  readOnly
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">{t('websocketUrl')}</label>
                 <input
-                                  type="text"
-                                  defaultValue="ws://localhost:3001/ws"
-                                  className="w-full px-3 py-2 border rounded-md bg-background"
-                                  readOnly
-                                />
+                  type="text"
+                  defaultValue="ws://localhost:3001/ws"
+                  className="w-full px-3 py-2 border rounded-md bg-background"
+                  readOnly
+                />
               </div>
             </CardContent>
           </Card>
         </TabsContent>
-        
+
         <TabsContent value="backup" className="mt-4 space-y-6">
           <Card>
             <CardHeader>
@@ -133,7 +313,7 @@ export default function System() {
               <p className="text-sm text-muted-foreground">{t('backupInfo')}</p>
             </CardContent>
           </Card>
-          
+
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -148,7 +328,7 @@ export default function System() {
             </CardContent>
           </Card>
         </TabsContent>
-        
+
         <TabsContent value="logs" className="mt-4 space-y-6">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
@@ -171,7 +351,7 @@ export default function System() {
                 </div>
               ) : (
                 <pre className="bg-gray-900 text-green-400 p-4 rounded-md font-mono text-sm max-h-96 overflow-auto">
-                  {logs.length > 0 ? logs.map((log: any) => 
+                  {logs.length > 0 ? logs.map((log: any) =>
                     `[${new Date(log.created_at).toLocaleString()}] ${log.level.toUpperCase()}  ${log.logger}: ${log.message}`
                   ).join('\n') : 'No logs available'}
                 </pre>
@@ -179,7 +359,7 @@ export default function System() {
             </CardContent>
           </Card>
         </TabsContent>
-        
+
         <TabsContent value="about" className="mt-4 space-y-6">
           <Card>
             <CardHeader>
@@ -246,7 +426,7 @@ export default function System() {
               </Button>
             </CardContent>
           </Card>
-          
+
           {/* API Health Status */}
           <Card>
             <CardHeader>
@@ -314,7 +494,91 @@ export default function System() {
             </CardContent>
           </Card>
         </TabsContent>
+
+        {isAdmin && <InvitesTab />}
+        {isAdmin && <AuditTab />}
       </Tabs>
     </div>
+  );
+}
+
+function CreateInviteDialog({ onSuccess }: { onSuccess: () => void }) {
+  const { t } = useTranslation('system');
+  const [site_id, setSiteId] = useState('');
+  const [role, setRole] = useState('viewer');
+  const [max_uses, setMaxUses] = useState(1);
+  const [expires_days, setExpiresDays] = useState('');
+  const [loading, setLoading] = useState(false);
+  const { createInvite } = useInviteTokens();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await createInvite({
+        site_id: site_id || undefined,
+        role,
+        max_uses,
+        expires_days: expires_days ? parseInt(expires_days) : undefined,
+      });
+      onSuccess();
+    } catch (err: any) {
+      console.error('Failed to create invite:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="space-y-2">
+        <label className="text-sm font-medium">{t('site') || 'Site'}</label>
+        <Input
+          placeholder={t('optional') || 'Optional'}
+          value={site_id}
+          onChange={(e) => setSiteId(e.target.value)}
+        />
+      </div>
+      <div className="space-y-2">
+        <label className="text-sm font-medium">{t('role') || 'Role'}</label>
+        <Select value={role} onValueChange={setRole}>
+          <SelectTrigger>
+            <SelectValue placeholder={t('selectRole') || 'Select role'} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="admin">{t('admin') || 'Admin'}</SelectItem>
+            <SelectItem value="operator">{t('operator') || 'Operator'}</SelectItem>
+            <SelectItem value="viewer">{t('viewer') || 'Viewer'}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-2">
+        <label className="text-sm font-medium">{t('maxUses') || 'Max Uses'}</label>
+        <Input
+          type="number"
+          min="1"
+          value={max_uses}
+          onChange={(e) => setMaxUses(parseInt(e.target.value) || 1)}
+        />
+      </div>
+      <div className="space-y-2">
+        <label className="text-sm font-medium">{t('expiresDays') || 'Expires (days)'}</label>
+        <Input
+          type="number"
+          min="1"
+          placeholder={t('never') || 'Never'}
+          value={expires_days}
+          onChange={(e) => setExpiresDays(e.target.value)}
+        />
+      </div>
+      <div className="flex justify-end gap-2 pt-4">
+        <Button type="button" variant="outline" onClick={() => {}}>
+          {t('cancel') || 'Cancel'}
+        </Button>
+        <Button type="submit" disabled={loading}>
+          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : t('create') || 'Create'}
+        </Button>
+      </div>
+    </form>
   );
 }

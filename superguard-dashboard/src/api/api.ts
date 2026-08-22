@@ -211,6 +211,31 @@ export interface SystemHealth {
   active_alarms: number;
 }
 
+export interface InviteToken {
+  id: string;
+  token: string;
+  site_id: string | null;
+  role: 'admin' | 'operator' | 'viewer';
+  max_uses: number;
+  used_count: number;
+  expires_at: string | null;
+  created_at: string;
+  created_by: string;
+}
+
+export interface AuditLog {
+  id: string;
+  user_id: string | null;
+  site_id: string | null;
+  action: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  details: Record<string, any>;
+  ip_address: string | null;
+  user_agent: string | null;
+  created_at: string;
+}
+
 export interface SystemLog {
   id: string;
   level: string;
@@ -621,6 +646,28 @@ class ApiService {
 
   async scanMac(mac: string, timeout = 2000) {
     const response = await this.client.post('/system/scan-mac', { mac, timeout });
+    return response.data;
+  }
+
+  // Admin: Invite Tokens
+  async createInviteToken(data: { site_id?: string; role: string; max_uses: number; expires_days?: number }) {
+    const response = await this.client.post('/auth/admin/invites', data);
+    return response.data;
+  }
+
+  async getInviteTokens() {
+    const response = await this.client.get('/auth/admin/invites');
+    return response.data;
+  }
+
+  async revokeInviteToken(inviteId: string) {
+    const response = await this.client.delete(`/auth/admin/invites/${inviteId}`);
+    return response.data;
+  }
+
+  // Admin: Audit Logs
+  async getAuditLogs(params?: { limit?: number; offset?: number; action?: string; user_id?: string; site_id?: string }) {
+    const response = await this.client.get('/auth/admin/audit', { params });
     return response.data;
   }
 

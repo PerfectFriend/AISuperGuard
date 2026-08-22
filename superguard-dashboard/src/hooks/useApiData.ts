@@ -21,7 +21,9 @@ import { api,
   type DetectorUpdate, 
   type ActuatorCommand, 
   type NotifierCreate, 
-  type DashboardResponse
+  type DashboardResponse,
+  type InviteToken,
+  type AuditLog
 } from '@/api/api';
 
 // Re-export types for use in components
@@ -30,7 +32,9 @@ export type {
   Rule, RuleCreate, RuleUpdate,
   SiteCreate, SiteUpdate, CameraCreate, CameraUpdate, ActuatorCreate, ActuatorUpdate,
   DetectorCreate, DetectorUpdate, ActuatorCommand, NotifierCreate, DashboardResponse,
-  ActuatorBinding
+  ActuatorBinding,
+  InviteToken,
+  AuditLog
 } from '@/api/api';
 
 export function useSites() {
@@ -572,4 +576,67 @@ export function useSystemActions() {
   };
 
   return { createBackup, restoreBackup, ping, scanMac };
+}
+
+// Admin: Invite Tokens
+export function useInviteTokens() {
+  const [invites, setInvites] = useState<InviteToken[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchInvites = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await api.getInviteTokens();
+      setInvites(data);
+      setError(null);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchInvites();
+  }, [fetchInvites]);
+
+  const createInvite = async (data: { site_id?: string; role: string; max_uses: number; expires_days?: number }) => {
+    const newInvite = await api.createInviteToken(data);
+    setInvites(prev => [newInvite, ...prev]);
+    return newInvite;
+  };
+
+  const revokeInvite = async (inviteId: string) => {
+    await api.revokeInviteToken(inviteId);
+    setInvites(prev => prev.filter(i => i.id !== inviteId));
+  };
+
+  return { invites, loading, error, refetch: fetchInvites, createInvite, revokeInvite };
+}
+
+// Admin: Audit Logs
+export function useAuditLogs(params?: { limit?: number; offset?: number; action?: string; user_id?: string; site_id?: string }) {
+  const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchLogs = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await api.getAuditLogs(params);
+      setLogs(data);
+      setError(null);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [params]);
+
+  useEffect(() => {
+    fetchLogs();
+  }, [fetchLogs, params]);
+
+  return { logs, loading, error, refetch: fetchLogs };
 }
